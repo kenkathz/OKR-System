@@ -26,14 +26,14 @@
   // ════════════════════════════════════════════════════════════════════
   (function() {
     var config = {
-      apiKey: "AIzaSyBfHayjEkJrVed9fHa4_fcUo9e8SejKdmk",
-  authDomain: "chiefs-okr-2026.firebaseapp.com",
-  databaseURL: "https://chiefs-okr-2026-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "chiefs-okr-2026",
-  storageBucket: "chiefs-okr-2026.firebasestorage.app",
-  messagingSenderId: "741356531786",
-  appId: "1:741356531786:web:35476a0e984d2005e2f6b3"
-};
+      apiKey:            "AIzaSyBfHayjEkJrVed9fHa4_fcUo9e8SejKdmk",
+      authDomain:        "chiefs-okr-2026.firebaseapp.com",
+      databaseURL:       "https://chiefs-okr-2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId:         "chiefs-okr-2026",
+      storageBucket:     "chiefs-okr-2026.firebasestorage.app",
+      messagingSenderId: "741356531786",
+      appId:             "1:741356531786:web:35476a0e984d2005e2f6b3"
+    };
 
     // Only initialise if config has been filled in
     var isConfigured = Object.values(config).every(function(v) {
@@ -66,13 +66,7 @@
   </style>
 </head>
 <body>
-  <div id="root">
-    <div style="min-height:100vh;background:#0a0c14;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:#6b7399;font-family:system-ui,sans-serif;font-size:14px;">
-      <div style="width:36px;height:36px;border:3px solid #1e2640;border-top-color:#4f8ef7;border-radius:50%;animation:spin .8s linear infinite;"></div>
-      <div>Connecting to OKR System…</div>
-      <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
-    </div>
-  </div>
+  <div id="root"></div>
 
   <script>
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
@@ -830,43 +824,51 @@ const IssueFormModal = ({ issue, deptList, onClose, onSave }) => {
 };
 
 // ── useFirebaseState ─────────────────────────────────────────────────────────
-// Real-time sync across all browsers via Firebase Realtime Database.
-// Every write is immediately visible to ALL connected users.
 function useFirebaseState(path, defaultValue) {
-  const [value, _setValue] = React.useState(defaultValue);
-  const [ready, setReady]  = React.useState(false);
+  const [value,  _setValue] = React.useState(defaultValue);
+  const [synced, setSynced] = React.useState(!window._DB); // true immediately if no Firebase
 
   React.useEffect(() => {
-    if (!window._DB) {
-      // Firebase not configured yet — just use defaultValue and mark ready
-      console.warn("Firebase not configured. Path:", path);
-      setReady(true);
-      return;
-    }
+    if (!window._DB) { setSynced(true); return; }
+
+    // 5-second timeout — show app even if Firebase is slow/blocked
+    const timer = setTimeout(function() {
+      console.warn("Firebase timeout on: " + path + " — showing app with defaults");
+      setSynced(true);
+    }, 5000);
+
     const ref = window._DB.ref(path);
-    ref.on("value", snapshot => {
-      const v = snapshot.val();
-      _setValue(v !== null && v !== undefined ? v : defaultValue);
-      setReady(true);
+    ref.on("value", function(snapshot) {
+      clearTimeout(timer);
+      var v = snapshot.val();
+      if (v !== null && v !== undefined) _setValue(v);
+      setSynced(true);
+    }, function(err) {
+      clearTimeout(timer);
+      console.error("Firebase read denied on " + path + ":", err.message,
+        "\n→ Fix: Go to Firebase Console → Realtime Database → Rules → set read/write to true");
+      setSynced(true); // show app anyway
     });
-    return () => ref.off("value");
+    return function() { clearTimeout(timer); ref.off("value"); };
   }, [path]);
 
-  const setValue = React.useCallback((updater) => {
-    _setValue(prev => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
+  const setValue = React.useCallback(function(updater) {
+    _setValue(function(prev) {
+      var next = typeof updater === "function" ? updater(prev) : updater;
       if (window._DB) {
-        window._DB.ref(path).set(next).catch(e => console.error("Firebase write error:", e));
+        window._DB.ref(path).set(next).catch(function(e) {
+          console.error("Firebase write error on " + path + ":", e.message);
+        });
       }
       return next;
     });
   }, [path]);
 
-  return [value, setValue, ready];
+  return [value, setValue, synced];
 }
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App({ isReadOnly = false, onRequestEdit }) {
-    const [rows, setRows, rowsReady] = useFirebaseState("okr/rows", []);
+    const [rows, setRows, rowsOk] = useFirebaseState("okr/rows", []);
     const [view, setView] = useState("dashboard");
     const [showAdd, setShowAdd] = useState(false);
     const [detailRow, setDetailRow] = useState(null);
@@ -879,28 +881,27 @@ function App({ isReadOnly = false, onRequestEdit }) {
     const [filterType, setFilterType] = useState("ALL");
     const [selDept, setSelDept] = useState(null);
     // Quarterly status — keyed by department name
-    const [qStatus, setQStatus, qReady] = useFirebaseState("okr/qstatus", INIT_QSTATUS);
+    const [qStatus, setQStatus, qOk] = useFirebaseState("okr/qstatus", INIT_QSTATUS);
     const [qEditCell, setQEditCell] = useState(null); // {dept, quarter, field:"sub"|"rev"|"note"}
     // Editable schedule dates
-    const [schedule, setSchedule, schedReady] = useFirebaseState("okr/schedule", DEFAULT_SCHEDULE);
+    const [schedule, setSchedule, schOk] = useFirebaseState("okr/schedule", DEFAULT_SCHEDULE);
     const [editSched, setEditSched] = useState(null); // {type:"sub"|"rev", chief, quarter}
     // Quarterly overview drill-down filter
     const [qFilter, setQFilter] = useState(null); // {quarter, status} — null = show all
     // Issues tracker
-    const [issues, setIssues, issuesReady] = useFirebaseState("okr/issues", []);
+    const [issues, setIssues, issOk] = useFirebaseState("okr/issues", []);
     const [showIssueForm, setShowIssueForm] = useState(false);
     const [editIssue, setEditIssue] = useState(null);
     const toast$ = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4000); };
-    // ── Loading gate: wait for Firebase to sync all data ─────────────────────
-    const dataReady = rowsReady && qReady && schedReady && issuesReady;
-    if (!dataReady) return React.createElement("div", {
-      style: { minHeight:"100vh", background:"#0a0c14", display:"flex", flexDirection:"column",
-               alignItems:"center", justifyContent:"center", fontFamily:"DM Sans,system-ui,sans-serif", gap:18 }
-    },
-      React.createElement("div", { style: { width:40, height:40, border:"3px solid #1e2640",
-        borderTopColor:"#4f8ef7", borderRadius:"50%", animation:"spin 0.8s linear infinite" } }),
-      React.createElement("div", { style: { color:"#6b7399", fontSize:14 } }, "Loading OKR System…"),
-      React.createElement("style", null, "@keyframes spin{to{transform:rotate(360deg)}}")
+    // Show brief loading screen only while Firebase is first syncing (max 5s)
+    if (!rowsOk || !qOk || !schOk || !issOk) return React.createElement("div", {
+      style:{minHeight:"100vh",background:"#0a0c14",display:"flex",flexDirection:"column",
+             alignItems:"center",justifyContent:"center",gap:16,fontFamily:"DM Sans,system-ui,sans-serif"}},
+      React.createElement("div",{style:{width:38,height:38,border:"3px solid #1e2640",borderTopColor:"#4f8ef7",
+        borderRadius:"50%",animation:"spin .8s linear infinite"}}),
+      React.createElement("div",{style:{color:"#6b7399",fontSize:14}},"Connecting to OKR System…"),
+      React.createElement("div",{style:{color:"#1e2640",fontSize:12}},"(max 5 seconds)"),
+      React.createElement("style",null,"@keyframes spin{to{transform:rotate(360deg)}}")
     );
     // ── Derived ───────────────────────────────────────────────────────────────────
     const allDepts = useMemo(() => [...new Set(rows.map(r => r.department))].sort(), [rows]);
