@@ -10,6 +10,35 @@
   <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
 
+  <!-- Firebase 9 compat SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+  <script>
+  // ════════════════════════════════════════════════════════════════
+  // FIREBASE CONFIG — already connected to your project
+  // ════════════════════════════════════════════════════════════════
+  const FIREBASE_CONFIG = {
+   apiKey: "AIzaSyBfHayjEkJrVed9fHa4_fcUo9e8SejKdmk",
+  authDomain: "chiefs-okr-2026.firebaseapp.com",
+  databaseURL: "https://chiefs-okr-2026-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "chiefs-okr-2026",
+  storageBucket: "chiefs-okr-2026.firebasestorage.app",
+  messagingSenderId: "741356531786",
+  appId: "1:741356531786:web:35476a0e984d2005e2f6b3"
+};
+  firebase.initializeApp(FIREBASE_CONFIG);
+  const DB = firebase.database();
+
+  // ── Sync helpers ──────────────────────────────────────────────
+  window._fbWrite = (path, val) => DB.ref(path).set(val);
+  window._fbListen = (path, cb) => {
+    const ref = DB.ref(path);
+    ref.on("value", snap => cb(snap.val()));
+    return () => ref.off("value");
+  };
+  </script>
+
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; background: #0a0c14; }
@@ -779,17 +808,39 @@ const IssueFormModal = ({ issue, deptList, onClose, onSave }) => {
                     React.createElement("button", { onClick: onClose, style: { flex: 1, padding: "10px 0", borderRadius: 9, border: "1px solid #1e2640", background: "transparent", color: "#6b7399", cursor: "pointer", fontWeight: 600 } }, "Cancel"),
                     React.createElement("button", { disabled: !valid, onClick: () => valid && onSave(form, issue === null || issue === void 0 ? void 0 : issue.id), style: { flex: 2, padding: "10px 0", borderRadius: 9, border: "none", background: valid ? "linear-gradient(135deg,#4f8ef7,#9b7ef8)" : "#1e2640", color: valid ? "#fff" : "#6b7399", cursor: valid ? "pointer" : "not-allowed", fontWeight: 700, fontSize: 14 } }, issue ? "Save Changes" : "Log Issue"))))));
 };
+
+// ── useFirebaseState — replaces useState for shared data ──────────────────────
+// Writes go to Firebase and broadcast to ALL connected clients in real-time.
+function useFirebaseState(path, defaultValue) {
+  const [value, _setValue] = React.useState(defaultValue);
+  const [ready, setReady]  = React.useState(false);
+  const skipNext = React.useRef(false);   // avoid echo-write on remote update
+
+  React.useEffect(() => {
+    const unsub = window._fbListen(path, remote => {
+      if (remote !== null && remote !== undefined) {
+        skipNext.current = true;
+        _setValue(remote);
+      }
+      setReady(true);
+    });
+    return unsub;
+  }, [path]);
+
+  const setValue = React.useCallback((updater) => {
+    _setValue(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      window._fbWrite(path, next);
+      return next;
+    });
+  }, [path]);
+
+  return [value, setValue, ready];
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App({ isReadOnly = false, onRequestEdit }) {
-    const [rows, setRows] = useState(() => {
-        try {
-            const s = localStorage.getItem("chiefs_okr_rows");
-            return s ? JSON.parse(s) : [];
-        }
-        catch (_a) {
-            return [];
-        }
-    });
+    const [rows, setRows, rowsReady] = useFirebaseState("okr/rows", []);
     const [view, setView] = useState("dashboard");
     const [showAdd, setShowAdd] = useState(false);
     const [detailRow, setDetailRow] = useState(null);
@@ -802,70 +853,29 @@ function App({ isReadOnly = false, onRequestEdit }) {
     const [filterType, setFilterType] = useState("ALL");
     const [selDept, setSelDept] = useState(null);
     // Quarterly status — keyed by department name
-    const [qStatus, setQStatus] = useState(() => {
-        try {
-            const s = localStorage.getItem("chiefs_okr_qstatus");
-            return s ? JSON.parse(s) : INIT_QSTATUS;
-        }
-        catch (_a) {
-            return INIT_QSTATUS;
-        }
-    });
+    const [qStatus, setQStatus, qReady] = useFirebaseState("okr/qstatus", INIT_QSTATUS);
     const [qEditCell, setQEditCell] = useState(null); // {dept, quarter, field:"sub"|"rev"|"note"}
     // Editable schedule dates
-    const [schedule, setSchedule] = useState(() => {
-        try {
-            const s = localStorage.getItem("chiefs_okr_schedule");
-            return s ? JSON.parse(s) : DEFAULT_SCHEDULE;
-        }
-        catch (_a) {
-            return DEFAULT_SCHEDULE;
-        }
-    });
+    const [schedule, setSchedule, schedReady] = useFirebaseState("okr/schedule", DEFAULT_SCHEDULE);
     const [editSched, setEditSched] = useState(null); // {type:"sub"|"rev", chief, quarter}
     // Quarterly overview drill-down filter
     const [qFilter, setQFilter] = useState(null); // {quarter, status} — null = show all
     // Issues tracker
-    const [issues, setIssues] = useState(() => {
-        try {
-            const s = localStorage.getItem("chiefs_okr_issues");
-            return s ? JSON.parse(s) : [];
-        }
-        catch (_a) {
-            return [];
-        }
-    });
+    const [issues, setIssues, issuesReady] = useFirebaseState("okr/issues", []);
     const [showIssueForm, setShowIssueForm] = useState(false);
     const [editIssue, setEditIssue] = useState(null);
     const toast$ = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4000); };
-    // Persist rows to localStorage on every change
-    useEffect(() => {
-        try {
-            localStorage.setItem("chiefs_okr_rows", JSON.stringify(rows));
-        }
-        catch (_a) { }
-    }, [rows]);
-    // Persist qStatus
-    useEffect(() => {
-        try {
-            localStorage.setItem("chiefs_okr_qstatus", JSON.stringify(qStatus));
-        }
-        catch (_a) { }
-    }, [qStatus]);
-    // Persist issues
-    useEffect(() => {
-        try {
-            localStorage.setItem("chiefs_okr_issues", JSON.stringify(issues));
-        }
-        catch (_a) { }
-    }, [issues]);
-    // Persist schedule
-    useEffect(() => {
-        try {
-            localStorage.setItem("chiefs_okr_schedule", JSON.stringify(schedule));
-        }
-        catch (_a) { }
-    }, [schedule]);
+    // ── Loading gate: wait for Firebase to sync all data ─────────────────────
+    const dataReady = rowsReady && qReady && schedReady && issuesReady;
+    if (!dataReady) return React.createElement("div", {
+      style: { minHeight:"100vh", background:"#0a0c14", display:"flex", flexDirection:"column",
+               alignItems:"center", justifyContent:"center", fontFamily:"DM Sans,system-ui,sans-serif", gap:18 }
+    },
+      React.createElement("div", { style: { width:40, height:40, border:"3px solid #1e2640",
+        borderTopColor:"#4f8ef7", borderRadius:"50%", animation:"spin 0.8s linear infinite" } }),
+      React.createElement("div", { style: { color:"#6b7399", fontSize:14 } }, "Connecting to server…"),
+      React.createElement("style", null, "@keyframes spin{to{transform:rotate(360deg)}}")
+    );
     // ── Derived ───────────────────────────────────────────────────────────────────
     const allDepts = useMemo(() => [...new Set(rows.map(r => r.department))].sort(), [rows]);
     const colorMap = useMemo(() => { const m = {}; allDepts.forEach((d, i) => m[d] = PALETTE[i % PALETTE.length]); return m; }, [allDepts]);
