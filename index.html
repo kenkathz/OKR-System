@@ -824,32 +824,20 @@ const IssueFormModal = ({ issue, deptList, onClose, onSave }) => {
 };
 
 // ── useFirebaseState ─────────────────────────────────────────────────────────
+// Renders app immediately with defaults. Firebase updates in background.
 function useFirebaseState(path, defaultValue) {
-  const [value,  _setValue] = React.useState(defaultValue);
-  const [synced, setSynced] = React.useState(!window._DB); // true immediately if no Firebase
+  const [value, _setValue] = React.useState(defaultValue);
 
   React.useEffect(() => {
-    if (!window._DB) { setSynced(true); return; }
-
-    // 5-second timeout — show app even if Firebase is slow/blocked
-    const timer = setTimeout(function() {
-      console.warn("Firebase timeout on: " + path + " — showing app with defaults");
-      setSynced(true);
-    }, 5000);
-
+    if (!window._DB) return;
     const ref = window._DB.ref(path);
     ref.on("value", function(snapshot) {
-      clearTimeout(timer);
       var v = snapshot.val();
       if (v !== null && v !== undefined) _setValue(v);
-      setSynced(true);
     }, function(err) {
-      clearTimeout(timer);
-      console.error("Firebase read denied on " + path + ":", err.message,
-        "\n→ Fix: Go to Firebase Console → Realtime Database → Rules → set read/write to true");
-      setSynced(true); // show app anyway
+      console.error("Firebase read error on " + path + ":", err.message);
     });
-    return function() { clearTimeout(timer); ref.off("value"); };
+    return function() { ref.off("value"); };
   }, [path]);
 
   const setValue = React.useCallback(function(updater) {
@@ -857,18 +845,18 @@ function useFirebaseState(path, defaultValue) {
       var next = typeof updater === "function" ? updater(prev) : updater;
       if (window._DB) {
         window._DB.ref(path).set(next).catch(function(e) {
-          console.error("Firebase write error on " + path + ":", e.message);
+          console.error("Firebase write error:", e);
         });
       }
       return next;
     });
   }, [path]);
 
-  return [value, setValue, synced];
+  return [value, setValue];
 }
 // ── Main App ──────────────────────────────────────────────────────────────────
 function App({ isReadOnly = false, onRequestEdit }) {
-    const [rows, setRows, rowsOk] = useFirebaseState("okr/rows", []);
+    const [rows, setRows] = useFirebaseState("okr/rows", []);
     const [view, setView] = useState("dashboard");
     const [showAdd, setShowAdd] = useState(false);
     const [detailRow, setDetailRow] = useState(null);
@@ -881,28 +869,19 @@ function App({ isReadOnly = false, onRequestEdit }) {
     const [filterType, setFilterType] = useState("ALL");
     const [selDept, setSelDept] = useState(null);
     // Quarterly status — keyed by department name
-    const [qStatus, setQStatus, qOk] = useFirebaseState("okr/qstatus", INIT_QSTATUS);
+    const [qStatus, setQStatus] = useFirebaseState("okr/qstatus", INIT_QSTATUS);
     const [qEditCell, setQEditCell] = useState(null); // {dept, quarter, field:"sub"|"rev"|"note"}
     // Editable schedule dates
-    const [schedule, setSchedule, schOk] = useFirebaseState("okr/schedule", DEFAULT_SCHEDULE);
+    const [schedule, setSchedule] = useFirebaseState("okr/schedule", DEFAULT_SCHEDULE);
     const [editSched, setEditSched] = useState(null); // {type:"sub"|"rev", chief, quarter}
     // Quarterly overview drill-down filter
     const [qFilter, setQFilter] = useState(null); // {quarter, status} — null = show all
     // Issues tracker
-    const [issues, setIssues, issOk] = useFirebaseState("okr/issues", []);
+    const [issues, setIssues] = useFirebaseState("okr/issues", []);
     const [showIssueForm, setShowIssueForm] = useState(false);
     const [editIssue, setEditIssue] = useState(null);
     const toast$ = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4000); };
-    // Show brief loading screen only while Firebase is first syncing (max 5s)
-    if (!rowsOk || !qOk || !schOk || !issOk) return React.createElement("div", {
-      style:{minHeight:"100vh",background:"#0a0c14",display:"flex",flexDirection:"column",
-             alignItems:"center",justifyContent:"center",gap:16,fontFamily:"DM Sans,system-ui,sans-serif"}},
-      React.createElement("div",{style:{width:38,height:38,border:"3px solid #1e2640",borderTopColor:"#4f8ef7",
-        borderRadius:"50%",animation:"spin .8s linear infinite"}}),
-      React.createElement("div",{style:{color:"#6b7399",fontSize:14}},"Connecting to OKR System…"),
-      React.createElement("div",{style:{color:"#1e2640",fontSize:12}},"(max 5 seconds)"),
-      React.createElement("style",null,"@keyframes spin{to{transform:rotate(360deg)}}")
-    );
+
     // ── Derived ───────────────────────────────────────────────────────────────────
     const allDepts = useMemo(() => [...new Set(rows.map(r => r.department))].sort(), [rows]);
     const colorMap = useMemo(() => { const m = {}; allDepts.forEach((d, i) => m[d] = PALETTE[i % PALETTE.length]); return m; }, [allDepts]);
