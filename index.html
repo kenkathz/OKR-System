@@ -757,19 +757,19 @@ const mkInitQStatus = (year) => {
   const done = year < 2026 ? "Updated" : "";
   const mk = (chief, q1="") => mkQ(chief, year < 2026 ? "Updated" : q1);
   return {
-    "Audit Department": mk("CFO","Updated"), "Legal Department": mk("CFO"),
-    "Accounting and Finance (INC)": mk("CFO"), "Finance and Accounting (SOL)": mk("CFO"),
-    "Accounting (EMSI)": mk("EMSI"), "BusDev Department": mk("CSO","Updated"),
-    "Marketing Division": mk("CSO"), "Governance, Risk and Compliance Department": mk("President","Updated"),
-    "SRE": mk("CSO", "Ongoing Update"), "Software Development Department": mk("CITO"),
-    "CHD (Frontline)": mk("COO"), "CHD (Backend)": mk("COO"),
-    "Security Systems and Technical Support": mk("COO"), "Research and Development": mk("COO"),
-    "Engineering Department": mk("COO"), "Human Capital Department": mk("COO"),
-    "Administration Division": mk("COO"), "Supply Chain Management Division": mk("COO"),
-    "Safety and Security Division": mk("COO"), "FDMS": mk("EMSI"),
-    "Collection": mk("CFO"), "Cash Logistics": mk("CFO"),
-    "Cash Management": mk("CFO"), "Maintenance": mk("CFO"),
-    "CorPlan Department": mk("President","Updated"),
+    "Audit": mk("President","Updated"), "Legal": mk("President"),
+    "Accounting and Finance (INC)": mk("CFO"), "Accounting and Finance (SOL)": mk("CFO"),
+    "Accounting and Finance (EMSI)": mk("EMSI"), "Business Development": mk("CSO","Updated"),
+    "Marketing": mk("CSO"), "Governance, Risk and Compliance Department": mk("CITO","Updated"),
+    "Site Reliability Engineer": mk("CITO", "Ongoing Update"), "Software Development": mk("CITO"),
+    "CHD (Frontline)": mk("CITO"), "CHD (Backend)": mk("CITO"),
+    "Security Systems and Technical Support": mk("CITO"), "Research and Development": mk("CITO"),
+    "Engineering": mk("COO"), "Human Capital": mk("COO"),
+    "Admin": mk("COO"), "Supply Chain Management": mk("COO"),
+    "Safety and Security": mk("COO"), "Financial Data Management Support": mk("EMSI"),
+    "Collection": mk("EMSI"), "Cash Logistics": mk("EMSI"),
+    "Cash Management": mk("EMSI"), "Maintenance": mk("EMSI"),
+    "PMO": mk("CSO","Updated"),"Strategy Planning and Execution":("CSO")
   };
 };
 const mkInitSchedule = (year) => ({
