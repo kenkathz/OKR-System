@@ -847,7 +847,7 @@ const isBg    = s => s==="Open"?"#f75f5f1a":s==="In Progress"?"#f5a6231a":s==="R
 const ISSUE_TYPE_LIST  = ["Dependency","Process Gap","Resource Constraint","Data Issue","System/Tool","Other"];
 
 const ALL_DEPTS_LIST = [
-  "Audit","Legal","Accounting and Finance (INC)","Finance and Accounting (SOL)","Accounting (EMSI)",
+  "Audit","Legal","Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance(EMSI)",
   "BusDev Department","PMO","Strategic Planning","Marketing Division",
   "Governance, Risk and Compliance Department","SRE","Software Development Department",
   "CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support","Research and Development",
@@ -863,8 +863,8 @@ const mkQ = (chief, q1="") => ({ chief, Q1:q1,Q2:"",Q3:"",Q4:"", Q1r:"",Q2r:"",Q
 const mkInitQStatus = (year) => ({
   "Audit": mkQ("President"), "Legal": mkQ("President"),
   "Accounting and Finance (INC)": mkQ("CFO"), "Accounting and Finance (SOL)": mkQ("CFO"),
-  "Accounting and Finance (EMSI)": mkQ("EMSI"), "Business Development": mkQ("CSO"),
-  "Marketing": mkQ("CSO"), "Governance, Risk and Compliance Department": mkQ("CITO"),
+  "Accounting and Finance (EMSI)": mkQ("CFO"), "Business Development": mkQ("CSO"),
+  "Marketing": mkQ("CSO"), "Governance, Risk and Compliance": mkQ("CITO"),
   "Site Reliability Engineer": mkQ("CITO"), "Software Development": mkQ("CITO"),
   "CHD (Frontline)": mkQ("CITO"), "CHD (Backend)": mkQ("CITO"),
   "Security Systems and Technical Support": mkQ("CITO"), "Research and Development": mkQ("CITO"),
