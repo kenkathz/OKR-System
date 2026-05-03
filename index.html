@@ -165,22 +165,22 @@ const PALETTE = ["#4f8ef7","#22d3a5","#9b7ef8","#f0b429","#f75f5f","#f5a623","#3
 
 const CHIEFS_GROUPS = {
   "President": ["Legal","Internal Audit"],
-  "CSO":       ["Business Development","Marketing","PMO","Strategic Planning and Execution"],
-  "CITO":      ["Software Development Department","CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support","Research and Development"],
+  "CSO":       ["Marketing","PMO","Business Development","Strategy Planning and Execution"],
+  "COO":       ["Safety and Security","Supply Chain","Human Capital","Admin","Engineering"],
+  "CITO":      ["Security Systems and Technical Support","Site Reliability Engineer","Software Development","Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)"],
   "CFO":       ["Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)"],
-  "EMSI":      ["Financial Data Management Support","Finance Operations","Reconciliation","Cash Management","Collection","Cash Logistics","Maintenance"],
-  "COO":       ["Human Capital","Admin","Safety and Security","Engineering","Supply Chain"],
+  "EMSI":      ["Cash Logistics","Finance Operations","Cash Management","Maintenance","Financial Data Management Support","Collection","Reconciliation"],
 };
 
 const DEPT_LIST = [
-  "Internal Audit","Legal","Accounting and Finance (INC)","Accounting and Finance (SOL)",
-  "Accounting and Finance (EMSI)","Business Development","PMO","Strategy Planning and Execution","Marketing",
-  "Governance, Risk and Compliance","Site Reliability Engineer","Software Development",
-  "CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support",
-  "Research and Development","Engineering","Human Capital",
-  "Admin","Supply Chain","Safety and Security",
-  "Financial Data Management Support","Collection","Cash Logistics","Finance Operations","Reconciliation",
-  "Cash Management","Maintenance","Accounting",
+  "Legal","Internal Audit",
+  "Marketing","PMO","Business Development","Strategy Planning and Execution",
+  "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
+  "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
+  "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
+  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
+  "Cash Logistics","Finance Operations","Cash Management","Maintenance",
+  "Financial Data Management Support","Collection","Reconciliation",
 ];
 
 const CHIEF_COLORS = { "President":"#f0b429","CSO":"#4f8ef7","COO":"#22d3a5","CFO":"#f75f5f","CITO":"#9b7ef8","EMSI":"#f5a623","Other":"#6b7399" };
@@ -208,7 +208,7 @@ const compute = row => {
 
 const mkey = r => `${(r.department||"").trim().toLowerCase()}||${(r.keyResult||"").trim().toLowerCase()}`;
 
-const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual\r\nCSO,BusDev Department,Close 10 new enterprise accounts,Dec 31 2026,10,0\r\nCOO,Engineering Department,Reduce project delivery cycle by 20%,Dec 31 2026,20,0\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0\r\nCITO,Software Development Department,Achieve 99.5% system uptime,Dec 31 2026,99.5,0\r\nPresident,CorPlan Department,Complete corporate plan for FY2027 by Q3,Dec 31 2026,100,0`;
+const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual\r\nCSO,Business Development,Close 10 new enterprise accounts,Dec 31 2026,10,0\r\nCOO,Engineering,Reduce project delivery cycle by 20%,Dec 31 2026,20,0\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0\r\nCITO,Software Development,Achieve 99.5% system uptime,Dec 31 2026,99.5,0\r\nPresident,Legal,Complete all legal compliance reviews by Q3,Dec 31 2026,100,0`;
 
 // ─── CSV PARSING ──────────────────────────────────────────────────────────────
 function parseCSV(rawText) {
@@ -607,7 +607,7 @@ const ImportModal = ({onParsed,onClose}) => {
               <div>
                 <div style={{fontSize:11,color:C.muted,marginBottom:6}}>Open your CSV in a text editor → Select All → Copy → paste below:</div>
                 <textarea value={pasted} onChange={e=>setPasted(e.target.value)}
-                  placeholder={"Chief Group,Department,Key Result,Target Date,Target,Actual\nCSO,BusDev Department,Close 10 new accounts,Dec 31 2026,10,0"}
+                  placeholder={"Chief Group,Department,Key Result,Target Date,Target,Actual\nCSO,Business Development,Close 10 new accounts,Dec 31 2026,10,0"}
                   style={{width:"100%",height:160,background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 11px",color:C.text,fontSize:11,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box",lineHeight:1.6}}
                   onFocus={e=>e.target.style.borderColor=C.green} onBlur={e=>e.target.style.borderColor=C.border}/>
                 <button onClick={()=>{if(!pasted.trim()){setErr("Paste CSV content first.");return;} tryParse(pasted);}}
@@ -847,13 +847,14 @@ const isBg    = s => s==="Open"?"#f75f5f1a":s==="In Progress"?"#f5a6231a":s==="R
 const ISSUE_TYPE_LIST  = ["Dependency","Process Gap","Resource Constraint","Data Issue","System/Tool","Other"];
 
 const ALL_DEPTS_LIST = [
-  "Audit","Legal","Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance(EMSI)",
-  "BusDev Department","PMO","Strategic Planning","Marketing Division",
-  "Governance, Risk and Compliance Department","SRE","Software Development Department",
-  "CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support","Research and Development",
-  "Engineering Department","Human Capital Department","Administration Division",
-  "Supply Chain Management Division","Safety and Security Division",
-  "FDMS","Collection","Cash Logistics","Finance Operations","Reconciliation","Cash Management","Maintenance",
+  "Legal","Internal Audit",
+  "Marketing","PMO","Business Development","Strategy Planning and Execution",
+  "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
+  "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
+  "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
+  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
+  "Cash Logistics","Finance Operations","Cash Management","Maintenance",
+  "Financial Data Management Support","Collection","Reconciliation",
 ];
 
 const CURRENT_YEAR = new Date().getFullYear();
@@ -861,19 +862,27 @@ const CURRENT_YEAR = new Date().getFullYear();
 const mkQ = (chief, q1="") => ({ chief, Q1:q1,Q2:"",Q3:"",Q4:"", Q1r:"",Q2r:"",Q3r:"",Q4r:"", Q1note:"",Q2note:"",Q3note:"",Q4note:"" });
 
 const mkInitQStatus = (year) => ({
-  "Audit": mkQ("President"), "Legal": mkQ("President"),
-  "Accounting and Finance (INC)": mkQ("CFO"), "Accounting and Finance (SOL)": mkQ("CFO"),
-  "Accounting and Finance (EMSI)": mkQ("CFO"), "Business Development": mkQ("CSO"),
-  "Marketing": mkQ("CSO"), "Governance, Risk and Compliance": mkQ("CITO"),
-  "Site Reliability Engineer": mkQ("CITO"), "Software Development": mkQ("CITO"),
+  // President
+  "Legal": mkQ("President"), "Internal Audit": mkQ("President"),
+  // CSO
+  "Marketing": mkQ("CSO"), "PMO": mkQ("CSO"),
+  "Business Development": mkQ("CSO"), "Strategy Planning and Execution": mkQ("CSO"),
+  // COO
+  "Safety and Security": mkQ("COO"), "Supply Chain": mkQ("COO"),
+  "Human Capital": mkQ("COO"), "Admin": mkQ("COO"), "Engineering": mkQ("COO"),
+  // CITO
+  "Security Systems and Technical Support": mkQ("CITO"), "Site Reliability Engineer": mkQ("CITO"),
+  "Software Development": mkQ("CITO"), "Research and Development": mkQ("CITO"),
+  "Governance, Risk and Compliance": mkQ("CITO"),
   "CHD (Frontline)": mkQ("CITO"), "CHD (Backend)": mkQ("CITO"),
-  "Security Systems and Technical Support": mkQ("CITO"), "Research and Development": mkQ("CITO"),
-  "Engineering": mkQ("COO"), "Human Capital": mkQ("COO"),
-  "Admin": mkQ("COO"), "Supply Chain Management": mkQ("COO"),
-  "Safety and Security": mkQ("COO"), "Financial Data Management Support": mkQ("EMSI"),
-  "Collection": mkQ("EMSI"), "Cash Logistics": mkQ("EMSI"),
+  // CFO
+  "Accounting and Finance (INC)": mkQ("CFO"), "Accounting and Finance (SOL)": mkQ("CFO"),
+  "Accounting and Finance (EMSI)": mkQ("CFO"),
+  // EMSI
+  "Cash Logistics": mkQ("EMSI"), "Finance Operations": mkQ("EMSI"),
   "Cash Management": mkQ("EMSI"), "Maintenance": mkQ("EMSI"),
-  "PMO": mkQ("CSO"), "Strategy Planning and Execution": mkQ("CSO"),
+  "Financial Data Management Support": mkQ("EMSI"),
+  "Collection": mkQ("EMSI"), "Reconciliation": mkQ("EMSI"),
 });
 
 const mkInitSchedule = (year) => ({
