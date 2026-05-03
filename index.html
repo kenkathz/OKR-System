@@ -118,6 +118,16 @@ const saveYearData = async (year, data) => {
   await rtSet("year_" + year, clean);
 };
 
+// Overwrites ONLY the qStatus node — used to hard-reset dirty dept keys
+const saveQStatusOnly = async (year, qStatus) => {
+  if (!USE_FB) return;
+  try {
+    const clean = JSON.parse(JSON.stringify(qStatus));
+    await db.ref(DB_ROOT + "/year_" + year + "/qStatus").set(clean);
+    console.log("✅ qStatus hard-reset for FY" + year);
+  } catch(e) { console.warn("qStatus reset failed:", e); }
+};
+
 // ── Load everything from RTDB on startup ──────────────────────────────────────
 const loadAllFromFirebase = async () => {
   if (!USE_FB) return null;
@@ -1103,8 +1113,30 @@ function App({ authUser, users, onUsersChange, onLogout }) {
           const cleanedStore = cleanYearStore(result.yearStore);
           setYearStore(cleanedStore);
           lsSave(LS_KEYS.yearStore, cleanedStore);
-          // Write cleaned data back to Firebase to permanently remove stale depts
+          // Permanently delete stale dept keys directly from Firebase
+          // then overwrite each year doc with clean data
+          const staleNames = [
+            "Customer Helpdesk","Governance, Risk and Compliance Department",
+            "Supply Chain Management","Mainatenance","Audit","SRE",
+            "Strategic Planning and Execution","Engineering Department",
+            "Human Capital Department","Administration Division",
+            "Supply Chain Management Division","Safety and Security Division",
+            "BusDev Department","Software Development Department",
+            "Accounting and Finance (EMSI) ",  // trailing space variant
+            "Supply Chain ",                   // trailing space variant
+          ];
+          Object.keys(result.yearStore).forEach(year => {
+            staleNames.forEach(bad => {
+              db.ref(DB_ROOT + "/year_" + year + "/qStatus/" + encodeURIComponent(bad)).remove()
+                .catch(() => {});
+              // Also try raw key (RTDB encodes / but not spaces)
+              db.ref(DB_ROOT + "/year_" + year + "/qStatus").child(bad).remove()
+                .catch(() => {});
+            });
+          });
+          // Hard-reset qStatus node for each year to completely replace with clean data
           Object.entries(cleanedStore).forEach(([year, data]) => {
+            saveQStatusOnly(Number(year), data.qStatus || {});
             saveYearData(Number(year), data);
           });
           // Switch to latest year
