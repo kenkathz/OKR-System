@@ -946,8 +946,9 @@ const mkInitQStatus = (year) => ({
   "Governance, Risk and Compliance": mkQ("CITO"),
   "CHD (Frontline)": mkQ("CITO"), "CHD (Backend)": mkQ("CITO"),
   // CFO
-  "Accounting and Finance (INC)": mkQ("CFO"), "Accounting and Finance (SOL)": mkQ("CFO"),
+  "Accounting and Finance (INC)": mkQ("CFO"),
   "Accounting and Finance (EMSI)": mkQ("CFO"),
+  "Accounting and Finance (SOL)": mkQ("CFO"),
   // EMSI
   "Cash Logistics": mkQ("EMSI"), "Finance Operations": mkQ("EMSI"),
   "Cash Management": mkQ("EMSI"), "Maintenance": mkQ("EMSI"),
@@ -988,8 +989,9 @@ const cleanStaleQStatus = (qStatus) => {
   Object.entries(qStatus).forEach(([dept, data]) => {
     const trimmed = dept.trim();
     if (isDeptOfficial(dept)) {
-      // Normalise key to trimmed version in case Firebase has trailing spaces
-      cleaned[trimmed] = { ...data, chief: data.chief || "Other" };
+      // Always re-derive chief from CHIEFS_GROUPS — never trust stored chief value
+      const correctChief = getChief(trimmed, "Other");
+      cleaned[trimmed] = { ...data, chief: correctChief };
     } else {
       console.log("🧹 Removed stale dept:", JSON.stringify(dept));
     }
@@ -1124,6 +1126,8 @@ function App({ authUser, users, onUsersChange, onLogout }) {
             "BusDev Department","Software Development Department",
             "Accounting and Finance (EMSI) ",  // trailing space variant
             "Supply Chain ",                   // trailing space variant
+            "Finance Operations ",             // trailing space variants
+            "Reconciliation ",
           ];
           Object.keys(result.yearStore).forEach(year => {
             staleNames.forEach(bad => {
