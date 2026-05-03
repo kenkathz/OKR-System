@@ -10,6 +10,42 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <!-- Firebase v10 compat CDN (works without build tools) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script>
+    // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────────────
+    // Get this from: Firebase Console → Project Settings → Your apps → SDK setup
+    const FIREBASE_CONFIG = {
+      apiKey:            "YOUR_API_KEY",
+      authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      projectId:         "YOUR_PROJECT_ID",
+      storageBucket:     "YOUR_PROJECT.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId:             "YOUR_APP_ID"
+    };
+    // ─────────────────────────────────────────────────────────────────────────
+
+    let _db = null;
+    let _firebaseReady = false;
+
+    try {
+      if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY") {
+        firebase.initializeApp(FIREBASE_CONFIG);
+        _db = firebase.firestore();
+        _firebaseReady = true;
+        console.log("✅ Firebase connected");
+      } else {
+        console.warn("⚠️ Firebase config not set — using localStorage only. Fill in FIREBASE_CONFIG above.");
+      }
+    } catch(e) {
+      console.error("Firebase init failed:", e);
+    }
+
+    // Expose globally for use in React
+    window.__db = _db;
+    window.__firebaseReady = _firebaseReady;
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -30,7 +66,66 @@
   <div id="root"></div>
   <script type="text/babel">
 
-const INITIAL_USERS = [
+// ─── STORAGE LAYER: Firebase Firestore + localStorage fallback ───────────────
+//  Firestore doc layout (collection: "okr_app"):
+//    users        → { list: [...] }
+//    years        → { list: [2026, 2027] }
+//    year_2026    → { rows, qStatus, schedule, issues }
+//
+const DB_COL = "okr_app";
+const db     = window.__db;
+const USE_FB = window.__firebaseReady;
+
+const LS_KEYS = {
+  yearStore: "okr_yearStore",
+  years:     "okr_years",
+  users:     "okr_users",
+};
+
+const lsSave = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch(e) {}
+};
+const lsLoad = (key, fallback) => {
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch(e) { return fallback; }
+};
+
+const fbSet = async (docId, data) => {
+  if (!USE_FB) return;
+  try { await db.collection(DB_COL).doc(docId).set(data, { merge: true }); }
+  catch(e) { console.warn("Firestore write failed:", e); }
+};
+const fbGet = async (docId) => {
+  if (!USE_FB) return null;
+  try { const s = await db.collection(DB_COL).doc(docId).get(); return s.exists ? s.data() : null; }
+  catch(e) { console.warn("Firestore read failed:", e); return null; }
+};
+
+const saveUsers = async (users) => { lsSave(LS_KEYS.users, users); await fbSet("users", { list: users }); };
+const saveYears = async (years) => { lsSave(LS_KEYS.years, years); await fbSet("years", { list: years }); };
+const saveYearData = async (year, data) => {
+  const cached = lsLoad(LS_KEYS.yearStore, {});
+  lsSave(LS_KEYS.yearStore, { ...cached, [year]: data });
+  await fbSet("year_" + year, data);
+};
+
+const loadAllFromFirebase = async () => {
+  if (!USE_FB) return null;
+  try {
+    const [usersSnap, yearsSnap] = await Promise.all([fbGet("users"), fbGet("years")]);
+    const years = yearsSnap ? yearsSnap.list : null;
+    if (!years || !years.length) return null;
+    const yearDocs = await Promise.all(years.map(y => fbGet("year_" + y)));
+    const yearStore = {};
+    years.forEach((y, i) => {
+      yearStore[y] = yearDocs[i] || mkEmptyYearData(y);
+      if (yearStore[y].rows) yearStore[y].rows = yearStore[y].rows.map(r => compute(r));
+    });
+    return { users: usersSnap ? usersSnap.list : null, years, yearStore };
+  } catch(e) { console.warn("Firebase load failed, using cache:", e); return null; }
+};
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const INITIAL_USERS_DEFAULT = [
   { id: "u1", username: "admin", password: "chiefs2026", role: "admin", name: "Administrator" },
 ];
 
@@ -38,6 +133,139 @@ const ROLE_COLORS = { admin:"#f0b429", editor:"#4f8ef7", viewer:"#22d3a5" };
 const ROLE_LABELS = { admin:"Admin", editor:"Editor", viewer:"Viewer" };
 
 const C2 = { bg:"#0a0c14",card:"#161b2e",surface:"#111420",border:"#1e2640",accent:"#4f8ef7",text:"#e8eaf2",muted:"#6b7399",red:"#f75f5f",green:"#22d3a5",gold:"#f0b429",purple:"#9b7ef8" };
+
+const C = {
+  bg:"#0a0c14", surface:"#111420", card:"#161b2e", border:"#1e2640",
+  accent:"#4f8ef7", gold:"#f0b429", green:"#22d3a5",
+  red:"#f75f5f", amber:"#f5a623", text:"#e8eaf2", muted:"#6b7399", purple:"#9b7ef8",
+};
+const PALETTE = ["#4f8ef7","#22d3a5","#9b7ef8","#f0b429","#f75f5f","#f5a623","#38bdf8","#fb7185","#a3e635","#e879f9","#34d399","#fbbf24","#60a5fa","#f97316"];
+
+const CHIEFS_GROUPS = {
+  "President": ["Legal","Internal Audit"],
+  "CSO":       ["Business Development","Marketing","PMO","Strategic Planning and Execution"],
+  "CITO":      ["Software Development Department","CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support","Research and Development","Engineering Department","Human Capital Department","Administration Division","Supply Chain Management Division","Safety and Security Division"],
+  "CFO":       ["Accounting and Finance (INC)","Accounting and Finance (SOL)"],
+  "EMSI":      ["Financial Data Management Support","Finance Operations","Reconciliation","Cash Management","Collection","Cash Logistics","Maintenance"],
+  "COO":       ["Human Capital","Admin","Safety and Security","Engineering","Supply Chain"],
+};
+
+const DEPT_LIST = [
+  "Internal Audit","Legal","Accounting and Finance (INC)","Accounting and Finance (SOL)",
+  "Accounting and Finance (EMSI)","Business Development","PMO","Strategy Planning and Execution","Marketing",
+  "Governance, Risk and Compliance","Site Reliability Engineer","Software Development",
+  "CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support",
+  "Research and Development","Engineering","Human Capital",
+  "Admin","Supply Chain","Safety and Security",
+  "Financial Data Management Support","Collection","Cash Logistics","Finance Operations","Reconciliation",
+  "Cash Management","Maintenance","Accounting",
+];
+
+const CHIEF_COLORS = { "President":"#f0b429","CSO":"#4f8ef7","COO":"#22d3a5","CFO":"#f75f5f","CITO":"#9b7ef8","EMSI":"#f5a623","Other":"#6b7399" };
+const CHIEF_NAMES  = Object.keys(CHIEFS_GROUPS);
+
+const getChief = (dept, fallback="Other") => {
+  const entry = Object.entries(CHIEFS_GROUPS).find(([c, depts]) =>
+    depts.some(d => d.toLowerCase().trim() === (dept||"").toLowerCase().trim())
+  );
+  return entry ? entry[0] : fallback;
+};
+
+const sc = s => s>=80?C.green:s>=60?C.amber:C.red;
+const sl = s => s>=80?"On Track":s>=60?"At Risk":"Off Track";
+const si = s => s>=80?"✓":s>=60?"⚠":"✕";
+
+let _uid = Date.now();
+const uid = () => ++_uid;
+
+const compute = row => {
+  const t=Number(row.target), a=Number(row.actual);
+  const pct = t===0?(a===0?100:0):Math.min((a/t)*100,100);
+  return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
+};
+
+const mkey = r => `${(r.department||"").trim().toLowerCase()}||${(r.keyResult||"").trim().toLowerCase()}`;
+
+const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual\r\nCSO,BusDev Department,Close 10 new enterprise accounts,Dec 31 2026,10,0\r\nCOO,Engineering Department,Reduce project delivery cycle by 20%,Dec 31 2026,20,0\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0\r\nCITO,Software Development Department,Achieve 99.5% system uptime,Dec 31 2026,99.5,0\r\nPresident,CorPlan Department,Complete corporate plan for FY2027 by Q3,Dec 31 2026,100,0`;
+
+// ─── CSV PARSING ──────────────────────────────────────────────────────────────
+function parseCSV(rawText) {
+  let text = rawText.replace(/^\uFEFF/, "");
+  const allRows = parseCSVRows(text);
+  if (allRows.length < 2) return { rows:[], errors:["File has no data rows."] };
+  const ALIAS = {
+    "key result":"keyresult","key_result":"keyresult","kr":"keyresult","key results":"keyresult","keyresults":"keyresult",
+    "weight (%)":"weight","kr weight":"weight","weight(%)":"weight","krweight":"weight","weight%":"weight",
+    "actual achievement":"actual","achievement":"actual","actuals":"actual",
+    "targets":"target","target value":"target",
+    "chief group":"chiefgroup","chief":"chiefgroup","chiefgroup":"chiefgroup","group":"chiefgroup",
+    "target date":"targetdate","date":"targetdate","due date":"targetdate",
+    "initiative":"initiative","key metric":"keyresult",
+  };
+  const headerRowIdx = allRows.findIndex(r => r.some(c => c.trim() !== ""));
+  if (headerRowIdx === -1) return { rows:[], errors:["No header row found."] };
+  const rawHdrs = allRows[headerRowIdx];
+  const hdrs = rawHdrs.map(h => {
+    const n = h.replace(/"/g,"").trim().toLowerCase();
+    return ALIAS[n] !== undefined ? ALIAS[n] : n;
+  });
+  const NEED = ["department","keyresult","target","actual"];
+  const miss = NEED.filter(n => !hdrs.includes(n));
+  if (miss.length) return { rows:[], errors:[`Missing required columns: ${miss.join(", ")}.\nDetected headers: ${rawHdrs.join(" | ")}`] };
+  const rows = [], errors = [];
+  const dataRows = allRows.slice(headerRowIdx + 1);
+  dataRows.forEach((cols, i) => {
+    if (cols.every(c => c.trim() === "")) return;
+    const o = {};
+    hdrs.forEach((h, idx) => { o[h] = (cols[idx] !== undefined ? cols[idx] : "").trim(); });
+    if (!o.department || !o.keyresult) {
+      if (cols.some(c => c.trim() !== "")) errors.push(`Row ${i+2}: missing Department or Key Result — skipped`);
+      return;
+    }
+    const w = o.weight ? parseFloat(o.weight) : 100;
+    const t = parseFloat(o.target), a = parseFloat(o.actual);
+    if (isNaN(t) || isNaN(a)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Target/Actual must be numbers — skipped`); return; }
+    rows.push({ department: o.department, keyResult: o.keyresult, chiefGroup: o.chiefgroup || getChief(o.department), targetDate: o.targetdate || "", weight: isNaN(w)?100:w, target: t, actual: a });
+  });
+  return { rows, errors };
+}
+
+function parseCSVRows(text) {
+  const rows = [];
+  let cur = [], field = "", inQuote = false;
+  let s = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\r') { s += '\n'; if (text[i+1] === '\n') i++; } else s += text[i];
+  }
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuote) {
+      if (ch === '"') { if (i + 1 < s.length && s[i+1] === '"') { field += '"'; i++; } else inQuote = false; }
+      else field += ch;
+    } else {
+      if (ch === '"') inQuote = true;
+      else if (ch === ',') { cur.push(field.trim()); field = ""; }
+      else if (ch === '\n') { cur.push(field.trim()); field = ""; if (cur.some(c => c !== "")) rows.push(cur); cur = []; }
+      else field += ch;
+    }
+  }
+  cur.push(field.trim());
+  if (cur.some(c => c !== "")) rows.push(cur);
+  return rows;
+}
+
+// ─── UI COMPONENTS ────────────────────────────────────────────────────────────
+const Bar = ({pct,color,h=6}) => (
+  <div style={{background:"#1e2640",borderRadius:99,height:h,overflow:"hidden",flexShrink:0}}>
+    <div style={{width:`${Math.min(pct,100)}%`,height:"100%",background:`linear-gradient(90deg,${color}44,${color})`,borderRadius:99,transition:"width .8s ease"}}/>
+  </div>
+);
+const Badge = ({score,small}) => {
+  const col=sc(score);
+  return <span style={{display:"inline-flex",alignItems:"center",gap:3,padding:small?"2px 7px":"3px 10px",borderRadius:99,fontSize:small?10:11,fontWeight:700,background:`${col}18`,color:col,border:`1px solid ${col}44`,whiteSpace:"nowrap"}}>{si(score)} {sl(score)}</span>;
+};
+
+// ─── MODALS ───────────────────────────────────────────────────────────────────
 function UserMgmtModal({ users, onClose, onSave }) {
   const [list, setList] = useState(users.map(u=>({...u})));
   const [form, setForm] = useState({ username:"", password:"", name:"", role:"editor" });
@@ -148,15 +376,18 @@ function UserMgmtModal({ users, onClose, onSave }) {
   );
 }
 
+// ─── AUTH GATE ────────────────────────────────────────────────────────────────
 function AuthGate() {
-
-  const [users,    setUsers]    = useState(INITIAL_USERS);
+  const [users,    setUsers]    = useState(() => lsLoad(LS_KEYS.users, INITIAL_USERS_DEFAULT));
   const [authUser, setAuthUser] = useState(null);
   const [screen,   setScreen]   = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
+
+  // Persist users (Firebase + localStorage cache)
+  useEffect(() => { saveUsers(users); }, [users]);
 
   const login = () => {
     setError("");
@@ -208,10 +439,8 @@ function AuthGate() {
             style={{width:"100%",background:C2.surface,border:`1px solid ${error?C2.red:C2.border}`,borderRadius:9,padding:"11px 14px",color:C2.text,fontSize:14,outline:"none",boxSizing:"border-box"}}
             onFocus={e=>e.target.style.borderColor=C2.accent} onBlur={e=>e.target.style.borderColor=error?C2.red:C2.border}/>
         </div>
-
         {error&&<div style={{fontSize:12,color:C2.red,marginBottom:12,textAlign:"center",background:`${C2.red}12`,padding:"8px 12px",borderRadius:7}}>{error}</div>}
-
-        <button onClick={login} disabled={loading} style={{width:"100%",padding:"13px",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C2.accent},${C2.purple})`,color:"#fff",cursor:loading?"not-allowed":"pointer",fontWeight:700,fontSize:15,marginBottom:12,opacity:loading ? 0.7:1,boxShadow:`0 4px 16px ${C2.accent}44`}}>
+        <button onClick={login} disabled={loading} style={{width:"100%",padding:"13px",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C2.accent},${C2.purple})`,color:"#fff",cursor:loading?"not-allowed":"pointer",fontWeight:700,fontSize:15,marginBottom:12,opacity:loading?0.7:1,boxShadow:`0 4px 16px ${C2.accent}44`}}>
           {loading?"Signing in…":"Sign In →"}
         </button>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
@@ -222,7 +451,6 @@ function AuthGate() {
         <button onClick={enterAsViewer} style={{width:"100%",padding:"11px",borderRadius:10,border:`1px solid ${C2.green}55`,background:`${C2.green}12`,color:C2.green,cursor:"pointer",fontWeight:700,fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
           <span style={{fontSize:16}}>👁</span> Continue as Viewer
         </button>
-
         <div style={{marginTop:16,textAlign:"center",fontSize:11,color:`${C2.muted}88`}}>
           Contact your administrator for login credentials
         </div>
@@ -231,135 +459,7 @@ function AuthGate() {
   );
 }
 
-const C = {
-  bg:"#0a0c14", surface:"#111420", card:"#161b2e", border:"#1e2640",
-  accent:"#4f8ef7", gold:"#f0b429", green:"#22d3a5",
-  red:"#f75f5f", amber:"#f5a623", text:"#e8eaf2", muted:"#6b7399", purple:"#9b7ef8",
-};
-const PALETTE = ["#4f8ef7","#22d3a5","#9b7ef8","#f0b429","#f75f5f","#f5a623","#38bdf8","#fb7185","#a3e635","#e879f9","#34d399","#fbbf24","#60a5fa","#f97316"];
-
-const CHIEFS_GROUPS = {
-  "President": ["Legal","Internal Audit"],
-  "CSO":       ["Business Development","Marketing","PMO","Strategic Planning and Execution"],
-  "CITO":       ["Software Development Department","CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support","Research and Development","Engineering Department","Human Capital Department","Administration Division","Supply Chain Management Division","Safety and Security Division"],
-  "CFO":       ["Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (SOL)"],
-  "EMSI":      ["Financial Data Management Support","Finance Operations","Reconciliation","Cash Management","Collection","Cash Logistics","Maintenance"],
-  "COO":       ["Human Capital","Admin","Safety and Security","Engineering","Supply Chain"],
-};
-
-const DEPT_LIST = [
-  "Internal Audit","Legal","Accounting and Finance (INC)","Accounting and Finance (SOL)",
-  "Accounting and Finance (EMSI)","Business Development","PMO","Strategy Planning and Execution","Marketing",
-  "Governance, Risk and Compliance","Site Reliability Engineer","Software Development",
-  "CHD (Frontline)","CHD (Backend)","Security Systems and Technical Support",
-  "Research and Development","Engineering","Human Capital",
-  "Admin","Supply Chain","Safety and Security",
-  "Financial Data Management Support","Collection","Cash Logistics","Finance Operations","Reconciliation",
-  "Cash Management","Maintenance","Accounting",
-];
-
-const CHIEF_COLORS = { "President":"#f0b429","CSO":"#4f8ef7","COO":"#22d3a5","CFO":"#f75f5f","CITO":"#9b7ef8","EMSI":"#f5a623","Other":"#6b7399" };
-const CHIEF_NAMES  = Object.keys(CHIEFS_GROUPS);
-
-const getChief = (dept, fallback="Other") => {
-  const entry = Object.entries(CHIEFS_GROUPS).find(([c, depts]) =>
-    depts.some(d => d.toLowerCase().trim() === (dept||"").toLowerCase().trim())
-  );
-  return entry ? entry[0] : fallback;
-};
-
-const sc = s => s>=80?C.green:s>=60?C.amber:C.red;
-const sl = s => s>=80?"On Track":s>=60?"At Risk":"Off Track";
-const si = s => s>=80?"✓":s>=60?"⚠":"✕";
-
-let _uid = 1;
-const uid = () => ++_uid;
-
-const compute = row => {
-  const t=Number(row.target), a=Number(row.actual);
-  const pct = t===0?(a===0?100:0):Math.min((a/t)*100,100);
-  return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
-};
-
-const mkey = r => `${(r.department||"").trim().toLowerCase()}||${(r.keyResult||"").trim().toLowerCase()}`;
-
-const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual\r\nCSO,BusDev Department,Close 10 new enterprise accounts,Dec 31 2026,10,0\r\nCOO,Engineering Department,Reduce project delivery cycle by 20%,Dec 31 2026,20,0\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0\r\nCITO,Software Development Department,Achieve 99.5% system uptime,Dec 31 2026,99.5,0\r\nPresident,CorPlan Department,Complete corporate plan for FY2027 by Q3,Dec 31 2026,100,0`;
-
-function parseCSV(rawText) {
-  let text = rawText.replace(/^\uFEFF/, "");
-  const allRows = parseCSVRows(text);
-  if (allRows.length < 2) return { rows:[], errors:["File has no data rows."] };
-  const ALIAS = {
-    "key result":"keyresult","key_result":"keyresult","kr":"keyresult","key results":"keyresult","keyresults":"keyresult",
-    "weight (%)":"weight","kr weight":"weight","weight(%)":"weight","krweight":"weight","weight%":"weight",
-    "actual achievement":"actual","achievement":"actual","actuals":"actual",
-    "targets":"target","target value":"target",
-    "chief group":"chiefgroup","chief":"chiefgroup","chiefgroup":"chiefgroup","group":"chiefgroup",
-    "target date":"targetdate","date":"targetdate","due date":"targetdate",
-    "initiative":"initiative","key metric":"keyresult",
-  };
-  const headerRowIdx = allRows.findIndex(r => r.some(c => c.trim() !== ""));
-  if (headerRowIdx === -1) return { rows:[], errors:["No header row found."] };
-  const rawHdrs = allRows[headerRowIdx];
-  const hdrs = rawHdrs.map(h => {
-    const n = h.replace(/"/g,"").trim().toLowerCase();
-    return ALIAS[n] !== undefined ? ALIAS[n] : n;
-  });
-  const NEED = ["department","keyresult","target","actual"];
-  const miss = NEED.filter(n => !hdrs.includes(n));
-  if (miss.length) return { rows:[], errors:[`Missing required columns: ${miss.join(", ")}.\nDetected headers: ${rawHdrs.join(" | ")}`] };
-  const rows = [], errors = [];
-  const dataRows = allRows.slice(headerRowIdx + 1);
-  dataRows.forEach((cols, i) => {
-    if (cols.every(c => c.trim() === "")) return;
-    const o = {};
-    hdrs.forEach((h, idx) => { o[h] = (cols[idx] !== undefined ? cols[idx] : "").trim(); });
-    if (!o.department || !o.keyresult) {
-      if (cols.some(c => c.trim() !== "")) errors.push(`Row ${i+2}: missing Department or Key Result — skipped`);
-      return;
-    }
-    const w = o.weight ? parseFloat(o.weight) : 100;
-    const t = parseFloat(o.target), a = parseFloat(o.actual);
-    if (isNaN(t) || isNaN(a)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Target/Actual must be numbers — skipped`); return; }
-    rows.push({ department: o.department, keyResult: o.keyresult, chiefGroup: o.chiefgroup || getChief(o.department), targetDate: o.targetdate || "", weight: isNaN(w)?100:w, target: t, actual: a });
-  });
-  return { rows, errors };
-}
-
-function parseCSVRows(text) {
-  const rows = [];
-  let cur = [], field = "", inQuote = false;
-  let s = "";
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\r') { s += '\n'; if (text[i+1] === '\n') i++; } else s += text[i];
-  }
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (inQuote) {
-      if (ch === '"') { if (i + 1 < s.length && s[i+1] === '"') { field += '"'; i++; } else inQuote = false; }
-      else field += ch;
-    } else {
-      if (ch === '"') inQuote = true;
-      else if (ch === ',') { cur.push(field.trim()); field = ""; }
-      else if (ch === '\n') { cur.push(field.trim()); field = ""; if (cur.some(c => c !== "")) rows.push(cur); cur = []; }
-      else field += ch;
-    }
-  }
-  cur.push(field.trim());
-  if (cur.some(c => c !== "")) rows.push(cur);
-  return rows;
-}
-
-const Bar = ({pct,color,h=6}) => (
-  <div style={{background:"#1e2640",borderRadius:99,height:h,overflow:"hidden",flexShrink:0}}>
-    <div style={{width:`${Math.min(pct,100)}%`,height:"100%",background:`linear-gradient(90deg,${color}44,${color})`,borderRadius:99,transition:"width .8s ease"}}/>
-  </div>
-);
-const Badge = ({score,small}) => {
-  const col=sc(score);
-  return <span style={{display:"inline-flex",alignItems:"center",gap:3,padding:small?"2px 7px":"3px 10px",borderRadius:99,fontSize:small?10:11,fontWeight:700,background:`${col}18`,color:col,border:`1px solid ${col}44`,whiteSpace:"nowrap"}}>{si(score)} {sl(score)}</span>;
-};
-
+// ─── TEMPLATE & IMPORT MODALS ─────────────────────────────────────────────────
 const TemplateModal = ({onClose}) => {
   const [blobUrl, setBlobUrl] = useState("");
   const [status, setStatus] = useState("idle");
@@ -600,7 +700,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
         </div>
         {!editing && (
           <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
               {[["Target",Number(row.target).toLocaleString(),C.muted],["Actual",Number(row.actual).toLocaleString(),C.text],["% Done",`${row.pct}%`,sc(row.pct)]].map(([l,v,col])=>(
                 <div key={l} style={{background:C.surface,borderRadius:9,padding:"10px 12px"}}>
                   <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.2,marginBottom:4}}>{l}</div>
@@ -684,6 +784,7 @@ const AddKRModal = ({onClose, onSave}) => {
   );
 };
 
+// ─── AI INSIGHTS ──────────────────────────────────────────────────────────────
 function getInsights(rows) {
   const deptMap = {};
   rows.forEach(r => { const d=r.department; if(!deptMap[d]) deptMap[d]={chief:r.chiefGroup||getChief(r.department),krs:[],w:0,s:0}; deptMap[d].krs.push(r); deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
@@ -698,7 +799,15 @@ function getInsights(rows) {
     system:"You are an OKR strategist. Return ONLY valid JSON, no markdown.",
     messages:[{role:"user",content:"OKR data for Chiefs Group. Overall: "+ovPct+"%. Departments:\n"+summary+"\nReturn JSON: {\"insights\":[\"...\",\"...\",\"...\"],\"recommendations\":[\"...\",\"...\",\"...\"],\"risks\":[\"...\",\"...\",\"...\"],\"overallAssessment\":\"2 sentences\"}"}]
   });
-return fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key": "YOUR_API_KEY_HERE","anthropic-version": "2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:body})
+  return fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body:body
+  })
     .then(function(res){ return res.json(); })
     .then(function(d){
       if(d.error) throw new Error(d.error.message||"API error");
@@ -706,6 +815,7 @@ return fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Co
     });
 }
 
+// ─── QUARTERLY / ISSUE HELPERS ────────────────────────────────────────────────
 const ssColor = s => s==="Updated"||s==="Done Review"?"#22d3a5":s==="Ongoing Update"||s==="Under Review"?"#f5a623":s==="No Update"?"#f75f5f":s==="Submitted"?"#4f8ef7":"#6b7399";
 const ssBg    = s => s==="Updated"||s==="Done Review"?"#22d3a51a":s==="Ongoing Update"||s==="Under Review"?"#f5a6231a":s==="No Update"?"#f75f5f1a":s==="Submitted"?"#4f8ef71a":"#6b73991a";
 
@@ -724,54 +834,26 @@ const ALL_DEPTS_LIST = [
   "FDMS","Collection","Cash Logistics","Finance Operations","Reconciliation","Cash Management","Maintenance",
 ];
 
-const CURRENT_YEAR = 2026;
-const INITIAL_YEARS = [2026];
+const CURRENT_YEAR = new Date().getFullYear();
 
 const mkQ = (chief, q1="") => ({ chief, Q1:q1,Q2:"",Q3:"",Q4:"", Q1r:"",Q2r:"",Q3r:"",Q4r:"", Q1note:"",Q2note:"",Q3note:"",Q4note:"" });
 
-const MOCK_ROWS_2026 = [
-  {id:1,chiefGroup:"President",department:"CorPlan Department",keyResult:"Complete corporate plan for FY2027 by Q3",weight:50,targetDate:"Sep 30 2026",target:100,actual:40},
-  {id:2,chiefGroup:"President",department:"Governance, Risk and Compliance Department",keyResult:"Achieve 95% compliance rate",weight:50,targetDate:"Dec 31 2026",target:95,actual:0},
-  {id:3,chiefGroup:"CSO",department:"BusDev Department",keyResult:"Close 10 new enterprise accounts",weight:40,targetDate:"Dec 31 2026",target:10,actual:2},
-  {id:4,chiefGroup:"CSO",department:"Marketing Division",keyResult:"Increase brand awareness score to 75%",weight:30,targetDate:"Dec 31 2026",target:75,actual:45},
-  {id:5,chiefGroup:"CSO",department:"SRE",keyResult:"Achieve 99.9% system uptime",weight:30,targetDate:"Dec 31 2026",target:99.9,actual:97.5},
-  {id:6,chiefGroup:"COO",department:"Engineering Department",keyResult:"Reduce project delivery cycle by 20%",weight:25,targetDate:"Dec 31 2026",target:20,actual:5},
-  {id:7,chiefGroup:"COO",department:"Human Capital Department",keyResult:"Achieve 90% employee engagement score",weight:25,targetDate:"Dec 31 2026",target:90,actual:75},
-  {id:8,chiefGroup:"COO",department:"Administration Division",keyResult:"Process 100% of admin requests within 24h",weight:20,targetDate:"Dec 31 2026",target:100,actual:60},
-  {id:9,chiefGroup:"COO",department:"Supply Chain Management Division",keyResult:"Reduce procurement cycle time by 30%",weight:15,targetDate:"Dec 31 2026",target:30,actual:8},
-  {id:10,chiefGroup:"COO",department:"Safety and Security Division",keyResult:"Zero lost-time incidents",weight:15,targetDate:"Dec 31 2026",target:100,actual:100},
-  {id:11,chiefGroup:"CFO",department:"Audit Department",keyResult:"Complete all internal audits on schedule",weight:20,targetDate:"Dec 31 2026",target:100,actual:75},
-  {id:12,chiefGroup:"CFO",department:"Legal Department",keyResult:"Resolve 90% of legal cases within 90 days",weight:20,targetDate:"Dec 31 2026",target:90,actual:0},
-  {id:13,chiefGroup:"CFO",department:"Accounting and Finance (INC)",keyResult:"Achieve 100% on-time financial reporting",weight:30,targetDate:"Dec 31 2026",target:100,actual:0},
-  {id:14,chiefGroup:"CFO",department:"Cash Management",keyResult:"Maintain cash reserve ratio above 15%",weight:30,targetDate:"Dec 31 2026",target:15,actual:18},
-  {id:15,chiefGroup:"CITO",department:"Software Development Department",keyResult:"Deploy unified ERP system by Q3",weight:60,targetDate:"Sep 30 2026",target:100,actual:20},
-  {id:16,chiefGroup:"CITO",department:"Software Development Department",keyResult:"Reduce critical bugs by 80% YoY",weight:40,targetDate:"Dec 31 2026",target:80,actual:35},
-  {id:17,chiefGroup:"EMSI",department:"Accounting (EMSI)",keyResult:"Achieve 95% cash reconciliation accuracy",weight:50,targetDate:"Dec 31 2026",target:95,actual:33},
-  {id:18,chiefGroup:"EMSI",department:"FDMS",keyResult:"Onboard 500 new merchants to FDMS",weight:50,targetDate:"Dec 31 2026",target:500,actual:120},
-  {id:19,chiefGroup:"COO",department:"Research and Development",keyResult:"Launch 3 new product prototypes",weight:50,targetDate:"Dec 31 2026",target:3,actual:1},
-  {id:20,chiefGroup:"COO",department:"CHD (Frontline)",keyResult:"Achieve customer satisfaction score of 4.5/5",weight:50,targetDate:"Dec 31 2026",target:4.5,actual:3.8},
-].map(r=>compute(r));
-const mkMockRows = (year) => year === 2026 ? MOCK_ROWS_2026 : [];
+const mkInitQStatus = (year) => ({
+  "Audit": mkQ("President"), "Legal": mkQ("President"),
+  "Accounting and Finance (INC)": mkQ("CFO"), "Accounting and Finance (SOL)": mkQ("CFO"),
+  "Accounting and Finance (EMSI)": mkQ("EMSI"), "Business Development": mkQ("CSO"),
+  "Marketing": mkQ("CSO"), "Governance, Risk and Compliance Department": mkQ("CITO"),
+  "Site Reliability Engineer": mkQ("CITO"), "Software Development": mkQ("CITO"),
+  "CHD (Frontline)": mkQ("CITO"), "CHD (Backend)": mkQ("CITO"),
+  "Security Systems and Technical Support": mkQ("CITO"), "Research and Development": mkQ("CITO"),
+  "Engineering": mkQ("COO"), "Human Capital": mkQ("COO"),
+  "Admin": mkQ("COO"), "Supply Chain Management": mkQ("COO"),
+  "Safety and Security": mkQ("COO"), "Financial Data Management Support": mkQ("EMSI"),
+  "Collection": mkQ("EMSI"), "Cash Logistics": mkQ("EMSI"),
+  "Cash Management": mkQ("EMSI"), "Maintenance": mkQ("EMSI"),
+  "PMO": mkQ("CSO"), "Strategy Planning and Execution": mkQ("CSO"),
+});
 
-const mkInitQStatus = (year) => {
-  const done = year < 2026 ? "Updated" : "";
-  const mk = (chief, q1="") => mkQ(chief, year < 2026 ? "Updated" : q1);
-  return {
-    "Audit": mk("President","Updated"), "Legal": mk("President"),
-    "Accounting and Finance (INC)": mk("CFO"), "Accounting and Finance (SOL)": mk("CFO"),
-    "Accounting and Finance (EMSI)": mk("EMSI"), "Business Development": mk("CSO","Updated"),
-    "Marketing": mk("CSO"), "Governance, Risk and Compliance Department": mk("CITO","Updated"),
-    "Site Reliability Engineer": mk("CITO", "Ongoing Update"), "Software Development": mk("CITO"),
-    "CHD (Frontline)": mk("CITO"), "CHD (Backend)": mk("CITO"),
-    "Security Systems and Technical Support": mk("CITO"), "Research and Development": mk("CITO"),
-    "Engineering": mk("COO"), "Human Capital": mk("COO"),
-    "Admin": mk("COO"), "Supply Chain Management": mk("COO"),
-    "Safety and Security": mk("COO"), "Financial Data Management Support": mk("EMSI"),
-    "Collection": mk("EMSI"), "Cash Logistics": mk("EMSI"),
-    "Cash Management": mk("EMSI"), "Maintenance": mk("EMSI"),
-    "PMO": mk("CSO","Updated"),"Strategy Planning and Execution":("CSO")
-  };
-};
 const mkInitSchedule = (year) => ({
   submission: { Q1:`April 24, ${year}`, Q2:`July 13, ${year}`, Q3:`October 12, ${year}`, Q4:`January 11, ${year+1}` },
   review: {
@@ -783,27 +865,35 @@ const mkInitSchedule = (year) => ({
     "EMSI":      { Q2:`July 21, ${year}`, Q3:`October 20, ${year}`, Q4:`January 17, ${year+1}` },
   },
 });
-const initYearData = () => ({
-  2026: {
-    rows: mkMockRows(2026),
-    qStatus: mkInitQStatus(2026),
-    schedule: mkInitSchedule(2026),
-    issues: [],
-  },
-});
 
+// ─── EMPTY year data (NO hardcoded KRs) ──────────────────────────────────────
 const mkEmptyYearData = (year) => ({
   rows: [],
   qStatus: mkInitQStatus(year),
   schedule: mkInitSchedule(year),
   issues: [],
 });
-const DEFAULT_SCHEDULE = mkInitSchedule(2026);
-const MOCK_ROWS = mkMockRows(2026);
-const INIT_QSTATUS = mkInitQStatus(2026);
 
-const REVIEW_WORKFLOW = ["","Submitted","Under Review","Done Review"];
+// ─── INIT: load from localStorage or create fresh empty data ─────────────────
+const initYearsFromStorage = () => lsLoad(LS_KEYS.years, [CURRENT_YEAR]);
+const initYearStoreFromStorage = () => {
+  const saved = lsLoad(LS_KEYS.yearStore, null);
+  if (saved) {
+    // Re-compute rows in case compute logic changed
+    const rehydrated = {};
+    Object.entries(saved).forEach(([year, ydata]) => {
+      rehydrated[year] = {
+        ...ydata,
+        rows: (ydata.rows || []).map(r => compute(r)),
+      };
+    });
+    return rehydrated;
+  }
+  // First time: empty data for current year only
+  return { [CURRENT_YEAR]: mkEmptyYearData(CURRENT_YEAR) };
+};
 
+// ─── ISSUE FORM MODAL ─────────────────────────────────────────────────────────
 const IssueFormModal = ({ issue, deptList, onClose, onSave }) => {
   const [form, setForm] = useState({
     type: (issue||{}).type||"", description: (issue||{}).description||"", raisedBy: (issue||{}).raisedBy||"",
@@ -853,14 +943,60 @@ const IssueFormModal = ({ issue, deptList, onClose, onSave }) => {
   );
 };
 
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function App({ authUser, users, onUsersChange, onLogout }) {
   const isReadOnly = (authUser||{}).role === "viewer";
   const isAdmin    = (authUser||{}).role === "admin";
   const [showUserMgmt, setShowUserMgmt] = useState(false);
-  const [activeYear,  setActiveYear]  = useState(CURRENT_YEAR);
-  const [years,       setYears]       = useState(INITIAL_YEARS);
-  const [yearStore,   setYearStore]   = useState(() => initYearData());
 
+  // ── Year state — starts from localStorage cache, then syncs Firebase ──
+  const [years,     setYears]     = useState(() => initYearsFromStorage());
+  const [yearStore, setYearStore] = useState(() => initYearStoreFromStorage());
+  const [activeYear, setActiveYear] = useState(() => {
+    const saved = initYearsFromStorage();
+    return saved[saved.length - 1] || CURRENT_YEAR;
+  });
+  const [fbLoading, setFbLoading] = useState(USE_FB);
+  const [fbStatus,  setFbStatus]  = useState(USE_FB ? "connecting" : "local");
+
+  // ── On mount: load latest data from Firebase (overrides localStorage cache) ──
+  useEffect(() => {
+    if (!USE_FB) return;
+    loadAllFromFirebase().then(result => {
+      if (result) {
+        if (result.users)     { onUsersChange(result.users); lsSave(LS_KEYS.users, result.users); }
+        if (result.years)     { setYears(result.years); lsSave(LS_KEYS.years, result.years); }
+        if (result.yearStore) {
+          setYearStore(result.yearStore);
+          lsSave(LS_KEYS.yearStore, result.yearStore);
+          // Switch to latest year
+          const latestYear = Math.max(...result.years);
+          setActiveYear(latestYear);
+        }
+        setFbStatus("connected");
+      } else {
+        setFbStatus(USE_FB ? "connected_empty" : "local");
+      }
+      setFbLoading(false);
+    }).catch(() => { setFbStatus("error"); setFbLoading(false); });
+  }, []);
+
+  // ── Persist years list on change ──
+  useEffect(() => { saveYears(years); }, [years]);
+
+  // ── Persist individual year data whenever yearStore changes ──
+  const prevYearStore = useRef({});
+  useEffect(() => {
+    Object.entries(yearStore).forEach(([year, data]) => {
+      const prev = prevYearStore.current[year];
+      if (JSON.stringify(prev) !== JSON.stringify(data)) {
+        saveYearData(Number(year), data);
+      }
+    });
+    prevYearStore.current = yearStore;
+  }, [yearStore]);
+
+  // ── Derived year data ──
   const rows     = (yearStore[activeYear]||{}).rows     || [];
   const qStatus  = (yearStore[activeYear]||{}).qStatus  || {};
   const schedule = (yearStore[activeYear]||{}).schedule || mkInitSchedule(activeYear);
@@ -871,29 +1007,27 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const setSchedule = updater => setYearStore(s=>({...s,[activeYear]:{...s[activeYear],schedule:typeof updater==="function"?updater((s[activeYear]||{}).schedule||mkInitSchedule(activeYear)):updater}}));
   const setIssues   = updater => setYearStore(s=>({...s,[activeYear]:{...s[activeYear],issues:typeof updater==="function"?updater((s[activeYear]||{}).issues||[]):updater}}));
 
-  const [view,        setView]        = useState("dashboard");
-  const [showAdd,     setShowAdd]     = useState(false);
-  const [detailRow,   setDetailRow]   = useState(null);
-  const [showTemplate,setShowTemplate]= useState(false);
-  const [showImport,  setShowImport]  = useState(false);
-  const [previewData, setPreviewData] = useState(null);
-  const [toast,       setToast]       = useState(null);
-  const [insights,    setInsights]    = useState(null);
-  const [loadingAI,   setLoadingAI]   = useState(false);
-  const [filterType,  setFilterType]  = useState("ALL");
-  const [selDept,     setSelDept]     = useState(null);
-  const [statusFilter,setStatusFilter]= useState(null);
-  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [view,         setView]         = useState("dashboard");
+  const [showAdd,      setShowAdd]      = useState(false);
+  const [detailRow,    setDetailRow]    = useState(null);
+  const [showTemplate, setShowTemplate] = useState(false);
+  const [showImport,   setShowImport]   = useState(false);
+  const [previewData,  setPreviewData]  = useState(null);
+  const [toast,        setToast]        = useState(null);
+  const [insights,     setInsights]     = useState(null);
+  const [loadingAI,    setLoadingAI]    = useState(false);
+  const [filterType,   setFilterType]   = useState("ALL");
+  const [selDept,      setSelDept]      = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+  const [selectedIds,  setSelectedIds]  = useState(new Set());
   const PAGE_SIZE = 15;
-  const [trackerPage, setTrackerPage] = useState(1);
-  const [rankPage,    setRankPage]    = useState(1);
-  const [qEditCell,   setQEditCell]   = useState(null);
-  const [editSched,   setEditSched]   = useState(null);
-  const [qFilter,     setQFilter]     = useState(null);
-  const [showIssueForm, setShowIssueForm] = useState(false);
-  const [editIssue,   setEditIssue]   = useState(null);
-  const [histDept,    setHistDept]    = useState(null);
-  const [showYearMenu,setShowYearMenu] = useState(false);
+  const [trackerPage,  setTrackerPage]  = useState(1);
+  const [rankPage,     setRankPage]     = useState(1);
+  const [qEditCell,    setQEditCell]    = useState(null);
+  const [editSched,    setEditSched]    = useState(null);
+  const [showIssueForm,setShowIssueForm]= useState(false);
+  const [editIssue,    setEditIssue]    = useState(null);
+  const [showYearMenu, setShowYearMenu] = useState(false);
   const yearMenuRef = useRef(null);
 
   const toast$ = (msg,type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),4000); };
@@ -906,27 +1040,24 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setDetailRow(null); setQEditCell(null); setEditSched(null);
     setYearStore(s => s[y] ? s : {...s, [y]: mkEmptyYearData(y)});
   };
+
   const addYear = () => {
     const maxYear = Math.max(...years);
     const newYear = maxYear + 1;
-    setYears(prev => [...prev, newYear].sort((a,b)=>a-b));
+    const newYears = [...years, newYear].sort((a,b)=>a-b);
+    setYears(newYears);
     setYearStore(s => ({...s, [newYear]: mkEmptyYearData(newYear)}));
     setShowYearMenu(false);
     switchYear(newYear);
     toast$(`FY ${newYear} created — add your KRs to get started.`);
   };
+
   const deleteYear = (y) => {
     const yData = yearStore[y];
     const hasRows = ((yData||{}).rows || []).length > 0;
     const hasIssues = ((yData||{}).issues || []).length > 0;
-    if (hasRows || hasIssues) {
-      toast$(`FY ${y} has data — clear all KRs and issues first before deleting.`,"warn");
-      return;
-    }
-    if (years.length <= 1) {
-      toast$("Cannot delete the only remaining year.","warn");
-      return;
-    }
+    if (hasRows || hasIssues) { toast$(`FY ${y} has data — clear all KRs and issues first before deleting.`,"warn"); return; }
+    if (years.length <= 1) { toast$("Cannot delete the only remaining year.","warn"); return; }
     const remaining = years.filter(yr => yr !== y).sort((a,b)=>a-b);
     setYears(remaining);
     setYearStore(s => { const next = {...s}; delete next[y]; return next; });
@@ -934,6 +1065,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setShowYearMenu(false);
     toast$(`FY ${y} deleted.`,"warn");
   };
+
   const historyData = useMemo(() => years.map(y => {
     const yRows = (yearStore[y]||{}).rows || [];
     const totW = yRows.reduce((s,r)=>s+r.weight,0);
@@ -1002,374 +1134,40 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setLoadingAI(true); setInsights(null);
     getInsights(rows)
       .then(function(result){ setInsights(result); setLoadingAI(false); })
-      .catch(function(e){ setInsights({error:"Could not load insights. "+e.message}); setLoadingAI(false); });
+      .catch(function(e){ setInsights({error:"Could not load AI insights. Add your API key or check the console. "+e.message}); setLoadingAI(false); });
   },[rows]);
 
   const exportPDF = useCallback(() => {
-    // ── shared helpers ──────────────────────────────────────────────────────
     const sc2  = p => p>=80?"#16a34a":p>=60?"#d97706":"#dc2626";
     const slbl = p => p>=80?"On Track":p>=60?"At Risk":"Off Track";
     const sbg  = p => p>=80?"#f0fdf4":p>=60?"#fffbeb":"#fef2f2";
     const esc  = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-
-    // ── Dashboard data ───────────────────────────────────────────────────────
     const totW2 = rows.reduce((s,r)=>s+r.weight,0);
     const totS2 = rows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const ovPct2 = totW2>0?(totS2/totW2)*100:0;
     const deptMap2 = {};
-    rows.forEach(r=>{
-      const d=r.department;
-      if(!deptMap2[d]) deptMap2[d]={chief:r.chiefGroup||getChief(r.department),w:0,s:0,krs:[]};
-      deptMap2[d].w+=r.weight; deptMap2[d].s+=r.scoreEquivalent; deptMap2[d].krs.push(r);
-    });
-    const deptList2 = Object.entries(deptMap2).map(([name,d])=>({
-      name, chief:d.chief,
-      pct:d.w>0?(d.s/d.w)*100:0,
-      krs:d.krs.length,
-      onTrack:d.krs.filter(r=>r.pct>=80).length,
-      atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length,
-      offTrack:d.krs.filter(r=>r.pct<60).length,
-    })).sort((a,b)=>b.pct-a.pct);
+    rows.forEach(r=>{ const d=r.department; if(!deptMap2[d]) deptMap2[d]={chief:r.chiefGroup||getChief(r.department),w:0,s:0,krs:[]}; deptMap2[d].w+=r.weight; deptMap2[d].s+=r.scoreEquivalent; deptMap2[d].krs.push(r); });
+    const deptList2 = Object.entries(deptMap2).map(([name,d])=>({ name, chief:d.chief, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
     const chiefMap2 = {};
-    rows.forEach(r=>{
-      const c=r.chiefGroup||getChief(r.department);
-      if(!chiefMap2[c]) chiefMap2[c]={depts:new Set(),w:0,s:0,krs:[]};
-      chiefMap2[c].depts.add(r.department); chiefMap2[c].w+=r.weight; chiefMap2[c].s+=r.scoreEquivalent; chiefMap2[c].krs.push(r);
-    });
-    const chiefList2 = Object.entries(chiefMap2).map(([name,d])=>({
-      name, depts:d.depts.size,
-      pct:d.w>0?(d.s/d.w)*100:0,
-      krs:d.krs.length,
-      onTrack:d.krs.filter(r=>r.pct>=80).length,
-      atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length,
-      offTrack:d.krs.filter(r=>r.pct<60).length,
-    })).sort((a,b)=>b.pct-a.pct);
-
-    // ── bar SVG helper ───────────────────────────────────────────────────────
-    const bar = (pct,w=120) => {
-      const fill=sc2(pct), p=Math.min(Math.max(pct,0),100);
-      return `<div style="display:flex;align-items:center;gap:6px"><div style="width:${w}px;height:7px;background:#e5e7eb;border-radius:99px;overflow:hidden"><div style="width:${p}%;height:100%;background:${fill};border-radius:99px"></div></div><span style="font-size:10px;color:${fill};font-weight:700">${pct.toFixed(1)}%</span></div>`;
-    };
-
-    // ── SECTION 1 — Dashboard ────────────────────────────────────────────────
-    const dashHTML = `
-    <div class="page-break-before section">
-      <div class="section-header" style="background:#1e40af">
-        <span class="section-icon">◈</span>
-        <div><div class="section-title">Dashboard</div><div class="section-sub">Overall KR status &amp; performance summary · FY ${activeYear}</div></div>
-      </div>
-
-      <div class="kpi-grid">
-        <div class="kpi-card" style="border-color:#4f8ef7">
-          <div class="kpi-label">Combined OKR Score</div>
-          <div class="kpi-value" style="color:${sc2(ovPct2)};font-size:42px">${ovPct2.toFixed(1)}%</div>
-          <div style="height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden;margin-top:6px"><div style="width:${Math.min(ovPct2,100)}%;height:100%;background:${sc2(ovPct2)};border-radius:99px"></div></div>
-          <div class="kpi-sub">${slbl(ovPct2)}</div>
-        </div>
-        <div class="kpi-card" style="border-color:#16a34a">
-          <div class="kpi-label">On Track</div>
-          <div class="kpi-value" style="color:#16a34a">${rows.filter(r=>r.pct>=80).length}</div>
-          <div class="kpi-sub">KRs ≥ 80%</div>
-        </div>
-        <div class="kpi-card" style="border-color:#d97706">
-          <div class="kpi-label">At Risk</div>
-          <div class="kpi-value" style="color:#d97706">${rows.filter(r=>r.pct>=60&&r.pct<80).length}</div>
-          <div class="kpi-sub">KRs 60–79%</div>
-        </div>
-        <div class="kpi-card" style="border-color:#dc2626">
-          <div class="kpi-label">Off Track</div>
-          <div class="kpi-value" style="color:#dc2626">${rows.filter(r=>r.pct<60).length}</div>
-          <div class="kpi-sub">KRs &lt; 60%</div>
-        </div>
-        <div class="kpi-card" style="border-color:#8b5cf6">
-          <div class="kpi-label">Departments</div>
-          <div class="kpi-value" style="color:#8b5cf6">${deptList2.length}</div>
-          <div class="kpi-sub">${rows.length} Total KRs</div>
-        </div>
-      </div>
-
-      <h3 class="table-heading">Chief Group Performance</h3>
-      <table>
-        <thead><tr>
-          <th>#</th><th>Chief Group</th><th>Depts</th><th>KRs</th>
-          <th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th>
-        </tr></thead>
-        <tbody>
-          ${chiefList2.map((c,i)=>`
-          <tr>
-            <td class="rank">${i+1}</td>
-            <td><b>${esc(c.name)}</b></td>
-            <td class="num">${c.depts}</td>
-            <td class="num">${c.krs}</td>
-            <td class="on">${c.onTrack}</td>
-            <td class="at">${c.atRisk}</td>
-            <td class="off">${c.offTrack}</td>
-            <td>${bar(c.pct,100)}</td>
-            <td><span class="badge" style="background:${sbg(c.pct)};color:${sc2(c.pct)};border:1px solid ${sc2(c.pct)}44">${slbl(c.pct)}</span></td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-
-      <h3 class="table-heading">Department Rankings</h3>
-      <table>
-        <thead><tr>
-          <th>#</th><th>Department</th><th>Chief</th><th>KRs</th>
-          <th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th>
-        </tr></thead>
-        <tbody>
-          ${deptList2.map((d,i)=>`
-          <tr>
-            <td class="rank">${i+1}</td>
-            <td><b>${esc(d.name)}</b></td>
-            <td>${esc(d.chief)}</td>
-            <td class="num">${d.krs}</td>
-            <td class="on">${d.onTrack}</td>
-            <td class="at">${d.atRisk}</td>
-            <td class="off">${d.offTrack}</td>
-            <td>${bar(d.pct,100)}</td>
-            <td><span class="badge" style="background:${sbg(d.pct)};color:${sc2(d.pct)};border:1px solid ${sc2(d.pct)}44">${slbl(d.pct)}</span></td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>`;
-
-    // ── SECTION 2 — KR Tracker ───────────────────────────────────────────────
-    const sortedRows = [...rows].sort((a,b)=>{
-      const ca=a.chiefGroup||getChief(a.department), cb=b.chiefGroup||getChief(b.department);
-      return ca.localeCompare(cb)||a.department.localeCompare(b.department)||b.pct-a.pct;
-    });
-    const krHTML = `
-    <div class="page-break-before section">
-      <div class="section-header" style="background:#065f46">
-        <span class="section-icon">⊞</span>
-        <div><div class="section-title">KR Tracker</div><div class="section-sub">All Key Results · FY ${activeYear} · ${rows.length} KRs across ${deptList2.length} departments</div></div>
-      </div>
-      <table>
-        <thead><tr>
-          <th>#</th><th>Chief</th><th>Department</th><th>Key Result</th>
-          <th>Target Date</th><th>Target</th><th>Actual</th><th>% Done</th><th>Status</th>
-        </tr></thead>
-        <tbody>
-          ${sortedRows.map((r,i)=>`
-          <tr>
-            <td class="rank">${i+1}</td>
-            <td><span class="tag">${esc(r.chiefGroup||getChief(r.department))}</span></td>
-            <td><b style="color:#1e40af">${esc(r.department)}</b></td>
-            <td style="max-width:260px">${esc(r.keyResult)}</td>
-            <td class="num">${esc(r.targetDate||"—")}</td>
-            <td class="num">${Number(r.target).toLocaleString()}</td>
-            <td class="num"><b>${Number(r.actual).toLocaleString()}</b></td>
-            <td><b style="color:${sc2(r.pct)}">${r.pct}%</b></td>
-            <td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)};border:1px solid ${sc2(r.pct)}44">${slbl(r.pct)}</span></td>
-          </tr>`).join("")}
-        </tbody>
-        <tfoot><tr>
-          <td colspan="7" style="text-align:right;font-weight:700;font-size:11px;color:#64748b">COMBINED SCORE</td>
-          <td><b style="color:${sc2(ovPct2)}">${ovPct2.toFixed(1)}%</b></td>
-          <td><span class="badge" style="background:${sbg(ovPct2)};color:${sc2(ovPct2)};border:1px solid ${sc2(ovPct2)}44">${slbl(ovPct2)}</span></td>
-        </tr></tfoot>
-      </table>
-    </div>`;
-
-    // ── SECTION 3 — Issues & Dependencies ───────────────────────────────────
-    const issueStatusColor = s => s==="Closed"?"#16a34a":s==="In Progress"?"#2563eb":s==="Escalated"?"#dc2626":"#d97706";
-    const issueStatusBg    = s => s==="Closed"?"#f0fdf4":s==="In Progress"?"#eff6ff":s==="Escalated"?"#fef2f2":"#fffbeb";
-    const openCount   = issues.filter(i=>i.status!=="Closed").length;
-    const closedCount = issues.filter(i=>i.status==="Closed").length;
-    const escalated   = issues.filter(i=>i.status==="Escalated").length;
-    const inProgress  = issues.filter(i=>i.status==="In Progress").length;
-    const issuesHTML = `
-    <div class="page-break-before section">
-      <div class="section-header" style="background:#7c2d12">
-        <span class="section-icon">⚑</span>
-        <div><div class="section-title">Issues &amp; Dependencies Tracker</div><div class="section-sub">Logged issues, dependencies &amp; assignments · FY ${activeYear} · ${issues.length} issue${issues.length!==1?"s":""}</div></div>
-      </div>
-
-      <div class="kpi-grid">
-        <div class="kpi-card" style="border-color:#64748b">
-          <div class="kpi-label">Total Issues</div>
-          <div class="kpi-value" style="color:#64748b">${issues.length}</div>
-          <div class="kpi-sub">All logged</div>
-        </div>
-        <div class="kpi-card" style="border-color:#d97706">
-          <div class="kpi-label">Open</div>
-          <div class="kpi-value" style="color:#d97706">${openCount}</div>
-          <div class="kpi-sub">Needs action</div>
-        </div>
-        <div class="kpi-card" style="border-color:#2563eb">
-          <div class="kpi-label">In Progress</div>
-          <div class="kpi-value" style="color:#2563eb">${inProgress}</div>
-          <div class="kpi-sub">Being resolved</div>
-        </div>
-        <div class="kpi-card" style="border-color:#dc2626">
-          <div class="kpi-label">Escalated</div>
-          <div class="kpi-value" style="color:#dc2626">${escalated}</div>
-          <div class="kpi-sub">Needs attention</div>
-        </div>
-        <div class="kpi-card" style="border-color:#16a34a">
-          <div class="kpi-label">Closed</div>
-          <div class="kpi-value" style="color:#16a34a">${closedCount}</div>
-          <div class="kpi-sub">Resolved</div>
-        </div>
-      </div>
-
-      ${issues.length===0
-        ? `<div style="text-align:center;padding:40px;color:#9ca3af;font-style:italic">No issues logged for FY ${activeYear}</div>`
-        : `<table>
-        <thead><tr>
-          <th>#</th><th>Type</th><th>Issue / Description</th><th>Raised By</th>
-          <th>Raised On</th><th>Assigned To</th><th>Status</th><th>Target Closure</th><th>Remarks</th>
-        </tr></thead>
-        <tbody>
-          ${issues.map((issue,i)=>`
-          <tr>
-            <td class="rank">${String(i+1).padStart(3,"0")}</td>
-            <td><span class="tag">${esc(issue.type||"—")}</span></td>
-            <td style="max-width:220px"><b>${esc(issue.description||"—")}</b></td>
-            <td>${esc(issue.raisedBy||"—")}</td>
-            <td class="num">${esc(issue.createdAt||"—")}</td>
-            <td style="max-width:160px">${(issue.assignedTo||[]).map(d=>`<span class="tag" style="background:#eff6ff;color:#2563eb;border-color:#bfdbfe">${esc(d)}</span>`).join(" ")||"—"}</td>
-            <td><span class="badge" style="background:${issueStatusBg(issue.status)};color:${issueStatusColor(issue.status)};border:1px solid ${issueStatusColor(issue.status)}44">${esc(issue.status||"Open")}</span></td>
-            <td class="num">${esc(issue.targetClosure||"—")}</td>
-            <td style="max-width:180px;color:#64748b;font-size:10px">${esc(issue.remarks||"—")}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table>`}
-    </div>`;
-
-    // ── Assemble full HTML ───────────────────────────────────────────────────
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Chiefs Group · OKR Full Report · FY ${activeYear}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#0f172a;font-size:11px;line-height:1.5}
-
-  /* ── Cover ── */
-  .cover{background:linear-gradient(135deg,#0f172a 0%,#1e3a8a 60%,#312e81 100%);color:#fff;padding:60px 48px;min-height:220px;display:flex;flex-direction:column;justify-content:center}
-  .cover-title{font-size:34px;font-weight:900;letter-spacing:2px;margin-bottom:6px}
-  .cover-sub{font-size:14px;opacity:.7;margin-bottom:20px}
-  .cover-meta{display:flex;gap:24px;flex-wrap:wrap;margin-top:16px}
-  .cover-pill{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);border-radius:99px;padding:5px 14px;font-size:12px;font-weight:600}
-  .cover-score{font-size:60px;font-weight:900;color:${sc2(ovPct2)};letter-spacing:1px;line-height:1;margin:16px 0 4px}
-
-  /* ── TOC ── */
-  .toc{padding:28px 40px;border-bottom:1px solid #e2e8f0}
-  .toc-title{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:2px;color:#64748b;margin-bottom:14px}
-  .toc-item{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed #e2e8f0;font-size:12px}
-  .toc-num{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:11px;color:#fff;flex-shrink:0}
-  .toc-dot{flex:1;border-bottom:1px dashed #cbd5e1}
-
-  /* ── Section ── */
-  .section{padding:24px 32px}
-  .page-break-before{page-break-before:always}
-  .section-header{display:flex;align-items:center;gap:14px;padding:16px 20px;border-radius:10px;color:#fff;margin-bottom:20px}
-  .section-icon{font-size:24px;opacity:.9}
-  .section-title{font-size:18px;font-weight:900;letter-spacing:1px}
-  .section-sub{font-size:11px;opacity:.75;margin-top:2px}
-  .table-heading{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;color:#475569;margin:20px 0 10px;padding-bottom:6px;border-bottom:2px solid #e2e8f0}
-
-  /* ── KPI cards ── */
-  .kpi-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
-  .kpi-card{flex:1;min-width:110px;background:#f8fafc;border:2px solid #e2e8f0;border-radius:10px;padding:14px 16px;border-top-width:3px}
-  .kpi-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#94a3b8;font-weight:700;margin-bottom:4px}
-  .kpi-value{font-size:28px;font-weight:900;line-height:1.1}
-  .kpi-sub{font-size:10px;color:#94a3b8;margin-top:3px}
-
-  /* ── Table ── */
-  table{width:100%;border-collapse:collapse;margin-bottom:20px;font-size:10.5px}
-  thead tr{background:#1e293b}
-  thead th{padding:7px 10px;text-align:left;color:#fff;font-size:9.5px;text-transform:uppercase;letter-spacing:1px;font-weight:700;white-space:nowrap}
-  tbody tr:nth-child(even){background:#f8fafc}
-  tbody tr:hover{background:#eff6ff}
-  td{padding:6px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
-  tfoot tr{background:#f0f9ff;border-top:2px solid #bae6fd}
-  tfoot td{padding:7px 10px;font-size:10.5px}
-  .rank{color:#94a3b8;font-weight:700;text-align:center;width:32px}
-  .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-  .on{color:#16a34a;font-weight:700;text-align:center}
-  .at{color:#d97706;font-weight:700;text-align:center}
-  .off{color:#dc2626;font-weight:700;text-align:center}
-
-  /* ── Badges & Tags ── */
-  .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:9.5px;font-weight:700;white-space:nowrap}
-  .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:9px;font-weight:700;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;white-space:nowrap;margin:1px}
-
-  /* ── Footer ── */
-  .footer{background:#0f172a;color:#94a3b8;padding:14px 32px;display:flex;justify-content:space-between;align-items:center;font-size:10px;margin-top:40px}
-  .footer b{color:#cbd5e1}
-
-  @media print{
-    @page{margin:1.2cm 1cm;size:A4 landscape}
-    .page-break-before{page-break-before:always}
-    .section{padding:16px 20px}
-    .cover{padding:40px 32px}
-    body{font-size:10px}
-  }
-
-  /* Print button */
-  .print-bar{position:fixed;bottom:20px;right:20px;display:flex;gap:10px;z-index:999}
-  .print-btn{padding:11px 22px;border-radius:10px;border:none;cursor:pointer;font-weight:700;font-size:13px}
-  @media print{.print-bar{display:none}}
-</style>
-</head>
-<body>
-
-<!-- Print bar -->
-<div class="print-bar">
-  <button class="print-btn" style="background:#1e40af;color:#fff" onclick="window.print()">🖨 Print / Save as PDF</button>
-</div>
-
-<!-- Cover -->
-<div class="cover">
-  <div style="font-size:12px;opacity:.5;text-transform:uppercase;letter-spacing:3px;margin-bottom:8px">Chiefs Group</div>
-  <div class="cover-title">OKR Full Report</div>
-  <div class="cover-sub">Strategic Planning &amp; Execution · Fiscal Year ${activeYear}</div>
-  <div class="cover-score">${ovPct2.toFixed(1)}%</div>
-  <div style="font-size:12px;color:${sc2(ovPct2)};font-weight:700;margin-bottom:4px">${slbl(ovPct2)} · Combined OKR Score</div>
-  <div class="cover-meta">
-    <span class="cover-pill">📅 Generated: ${new Date().toLocaleString()}</span>
-    <span class="cover-pill">📋 ${rows.length} Key Results</span>
-    <span class="cover-pill">🏢 ${deptList2.length} Departments</span>
-    <span class="cover-pill">⚑ ${issues.length} Issues</span>
-    <span class="cover-pill">✓ ${rows.filter(r=>r.pct>=80).length} On Track · ⚠ ${rows.filter(r=>r.pct>=60&&r.pct<80).length} At Risk · ✕ ${rows.filter(r=>r.pct<60).length} Off Track</span>
-  </div>
-</div>
-
-<!-- TOC -->
-<div class="toc">
-  <div class="toc-title">Table of Contents</div>
-  <div class="toc-item"><div class="toc-num" style="background:#1e40af">1</div><span>Dashboard — Overall KR Status &amp; Performance Summary</span><div class="toc-dot"></div><span style="color:#94a3b8">${deptList2.length} Departments · ${chiefList2.length} Chief Groups</span></div>
-  <div class="toc-item"><div class="toc-num" style="background:#065f46">2</div><span>KR Tracker — All Key Results Detail</span><div class="toc-dot"></div><span style="color:#94a3b8">${rows.length} KRs</span></div>
-  <div class="toc-item"><div class="toc-num" style="background:#7c2d12">3</div><span>Issues &amp; Dependencies Tracker</span><div class="toc-dot"></div><span style="color:#94a3b8">${issues.length} Issues · ${openCount} Open · ${closedCount} Closed</span></div>
-</div>
-
-${dashHTML}
-${krHTML}
-${issuesHTML}
-
-<div class="footer">
-  <div><b>Chiefs Group · OKR Tracker</b> &nbsp;·&nbsp; FY ${activeYear} Full Report</div>
-  <div>Generated ${new Date().toLocaleString()}</div>
-</div>
-
-</body></html>`;
-
+    rows.forEach(r=>{ const c=r.chiefGroup||getChief(r.department); if(!chiefMap2[c]) chiefMap2[c]={depts:new Set(),w:0,s:0,krs:[]}; chiefMap2[c].depts.add(r.department); chiefMap2[c].w+=r.weight; chiefMap2[c].s+=r.scoreEquivalent; chiefMap2[c].krs.push(r); });
+    const chiefList2 = Object.entries(chiefMap2).map(([name,d])=>({ name, depts:d.depts.size, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    const bar = (pct,w=120) => { const fill=sc2(pct), p=Math.min(Math.max(pct,0),100); return `<div style="display:flex;align-items:center;gap:6px"><div style="width:${w}px;height:7px;background:#e5e7eb;border-radius:99px;overflow:hidden"><div style="width:${p}%;height:100%;background:${fill};border-radius:99px"></div></div><span style="font-size:10px;color:${fill};font-weight:700">${pct.toFixed(1)}%</span></div>`; };
+    const sortedRows = [...rows].sort((a,b)=>{ const ca=a.chiefGroup||getChief(a.department), cb=b.chiefGroup||getChief(b.department); return ca.localeCompare(cb)||a.department.localeCompare(b.department)||b.pct-a.pct; });
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Chiefs Group OKR Report FY ${activeYear}</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#0f172a;font-size:11px}.cover{background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#fff;padding:48px;}.cover-title{font-size:32px;font-weight:900;letter-spacing:2px;}.kpi-grid{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}.kpi-card{flex:1;min-width:110px;background:#f8fafc;border:2px solid #e2e8f0;border-radius:10px;padding:14px;border-top-width:3px}.kpi-label{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#94a3b8;font-weight:700;margin-bottom:4px}.kpi-value{font-size:28px;font-weight:900}.section{padding:24px 32px}table{width:100%;border-collapse:collapse;margin-bottom:16px}thead tr{background:#1e293b}thead th{padding:7px 10px;text-align:left;color:#fff;font-size:9.5px;text-transform:uppercase;letter-spacing:1px;font-weight:700}tbody tr:nth-child(even){background:#f8fafc}td{padding:6px 10px;border-bottom:1px solid #f1f5f9}.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:9.5px;font-weight:700}.print-bar{position:fixed;bottom:20px;right:20px}@media print{.print-bar{display:none}@page{margin:1cm;size:A4 landscape}}</style></head><body>
+    <div class="print-bar"><button onclick="window.print()" style="padding:11px 22px;border-radius:10px;border:none;background:#1e40af;color:#fff;cursor:pointer;font-weight:700">🖨 Print / Save PDF</button></div>
+    <div class="cover"><div style="font-size:11px;opacity:.5;letter-spacing:3px;margin-bottom:8px">CHIEFS GROUP</div><div class="cover-title">OKR Full Report · FY ${activeYear}</div><div style="font-size:52px;font-weight:900;color:${sc2(ovPct2)};margin:12px 0 4px">${ovPct2.toFixed(1)}%</div><div style="font-size:12px;color:${sc2(ovPct2)};font-weight:700">${slbl(ovPct2)} · Combined OKR Score</div><div style="margin-top:12px;font-size:11px;opacity:.6">Generated ${new Date().toLocaleString()} · ${rows.length} KRs · ${deptList2.length} Departments</div></div>
+    <div class="section"><h2 style="margin-bottom:14px">Chief Group Performance</h2><table><thead><tr><th>#</th><th>Chief Group</th><th>Depts</th><th>KRs</th><th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th></tr></thead><tbody>${chiefList2.map((c,i)=>`<tr><td>${i+1}</td><td><b>${esc(c.name)}</b></td><td>${c.depts}</td><td>${c.krs}</td><td style="color:#16a34a;font-weight:700">${c.onTrack}</td><td style="color:#d97706;font-weight:700">${c.atRisk}</td><td style="color:#dc2626;font-weight:700">${c.offTrack}</td><td>${bar(c.pct,100)}</td><td><span class="badge" style="background:${sbg(c.pct)};color:${sc2(c.pct)}">${slbl(c.pct)}</span></td></tr>`).join("")}</tbody></table>
+    <h2 style="margin:20px 0 14px">All Key Results</h2><table><thead><tr><th>#</th><th>Chief</th><th>Department</th><th>Key Result</th><th>Target Date</th><th>Target</th><th>Actual</th><th>% Done</th><th>Status</th></tr></thead><tbody>${sortedRows.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.chiefGroup||getChief(r.department))}</td><td><b>${esc(r.department)}</b></td><td>${esc(r.keyResult)}</td><td>${esc(r.targetDate||"—")}</td><td>${Number(r.target).toLocaleString()}</td><td><b>${Number(r.actual).toLocaleString()}</b></td><td style="color:${sc2(r.pct)};font-weight:700">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`).join("")}</tbody></table></div></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `OKR_Full_Report_FY${activeYear}_${new Date().toISOString().slice(0,10)}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = `OKR_Report_FY${activeYear}_${new Date().toISOString().slice(0,10)}.html`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 2000);
-    toast$("Full report downloaded — open the file and click 'Print / Save as PDF'.");
+    toast$("Report downloaded — open the file and click Print / Save as PDF.");
   }, [rows, issues, activeYear]);
 
-  useEffect(()=>{if(view==="dashboard")loadAI();},[view]);
+  useEffect(()=>{ if(view==="dashboard" && rows.length > 0) loadAI(); },[view]);
   useEffect(()=>{
     if(!showYearMenu) return;
     const close = (e)=>{ if(yearMenuRef.current && !yearMenuRef.current.contains(e.target)) setShowYearMenu(false); };
@@ -1377,11 +1175,11 @@ ${issuesHTML}
     return ()=>document.removeEventListener("mousedown", close);
   },[showYearMenu]);
 
-  const updateQStatus  = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[q]:val}})); setQEditCell(null); toast$(`${dept} — ${q} updated.`); };
-  const updateQReview  = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[`${q}r`]:val}})); setQEditCell(null); toast$(`${dept} — ${q} review updated.`); };
-  const updateQNote    = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[`${q}note`]:val}})); };
-
+  // Auto-add qStatus entry for any new department in rows
   useEffect(()=>{ setQStatus(prev=>{ const updated={...prev}; rows.forEach(r=>{ if(r.department&&!updated[r.department]) updated[r.department]=mkQ(r.chiefGroup||getChief(r.department)); }); return updated; }); },[rows]);
+
+  const updateQStatus = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[q]:val}})); setQEditCell(null); toast$(`${dept} — ${q} updated.`); };
+  const updateQNote   = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[`${q}note`]:val}})); };
 
   const qDeptsByChief = useMemo(()=>{
     const map={};
@@ -1408,69 +1206,35 @@ ${issuesHTML}
         .kr-row{transition:background .12s;}
         .kr-row:hover{background:${C.accent}0a!important;cursor:pointer}
         .dsk{display:block}.mob{display:none}
-        .s-card{background:#161b2e;border:1px solid #1e2640;border-radius:16px;overflow:hidden}
-        .s-lbl{font-size:10px;color:#6b7399;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;display:block;margin-bottom:4px}
-
-        /* ── Mobile nav ── */
         @media(max-width:700px){
           .dsk{display:none!important}.mob{display:flex!important}
           .hero-grid,.chief-grid,.dept-grid,.ins-grid{grid-template-columns:1fr!important}
-
-          /* Nav: stack year pill + icon-only buttons */
           .nav-actions{flex-wrap:nowrap;gap:2px!important;overflow-x:auto;-webkit-overflow-scrolling:touch}
           .nav-actions .nav-label{display:none}
           .nav-btn-text{display:none!important}
-
-          /* Year menu full-width on mobile */
           .year-dropdown{left:auto!important;right:0!important;min-width:180px!important}
-
-          /* Main content padding */
           .main-pad{padding:12px 8px!important}
-
-          /* Dashboard score tiles */
           .score-tiles{grid-template-columns:1fr 1fr!important}
-
-          /* Rankings table — hide some columns */
-          .rank-col-pts,.rank-col-bar{display:none!important}
-          .rank-grid{grid-template-columns:28px 1fr 80px 90px!important}
-
-          /* KR Tracker table — horizontal scroll on mobile */
           .tracker-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-
-          /* Filter pills — scroll horizontal */
           .filter-pills{flex-wrap:nowrap!important;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px}
-          .filter-pills::-webkit-scrollbar{height:2px}
-
-          /* Summary bar compact */
           .summary-bar{flex-wrap:wrap;gap:8px!important}
-
-          /* Pagination compact */
-          .pag-btn-text{display:none}
-
-          /* Quarterly table */
           .q-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-
-          /* History bar chart taller bars on mobile */
-          .hist-chart{height:160px!important}
-
-          /* Modal full-screen on mobile */
-          .modal-box{width:100vw!important;max-width:100vw!important;height:100dvh!important;max-height:100dvh!important;border-radius:0!important;margin:0!important}
-
-          /* User mgmt modal */
-          .mgmt-grid{grid-template-columns:1fr!important}
-
-          /* Issues list */
-          .issue-grid{grid-template-columns:1fr!important}
-
-          /* Toolbar wrap */
           .tracker-toolbar{flex-wrap:wrap;gap:6px!important}
         }
       `}</style>
 
       <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'DM Sans',sans-serif",paddingBottom:60}}>
 
+        {/* Firebase loading overlay */}
+        {fbLoading&&<div style={{position:"fixed",inset:0,background:"#0a0c14f0",zIndex:9999,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+          <div style={{width:48,height:48,border:"3px solid #1e2640",borderTopColor:"#4f8ef7",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+          <div style={{fontSize:16,fontWeight:700,color:"#e8eaf2"}}>Loading from Firebase…</div>
+          <div style={{fontSize:12,color:"#6b7399"}}>Syncing your OKR data</div>
+        </div>}
+
         {toast&&<div style={{position:"fixed",top:14,right:14,zIndex:999,background:C.card,border:`1px solid ${toast.type==="success"?C.green:toast.type==="warn"?C.amber:C.red}66`,borderRadius:12,padding:"12px 18px",fontSize:13,fontWeight:600,color:toast.type==="success"?C.green:toast.type==="warn"?C.amber:C.red,maxWidth:340,animation:"fadeUp .3s ease",boxShadow:"0 8px 32px #000a"}}>{toast.msg}</div>}
 
+        {/* ── NAV ── */}
         <nav style={{background:`${C.surface}f0`,backdropFilter:"blur(14px)",borderBottom:`1px solid ${C.border}`,padding:"0 12px",position:"sticky",top:0,zIndex:50,display:"flex",alignItems:"center",justifyContent:"space-between",height:56,gap:8}}>
           <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
             <div style={{width:33,height:33,borderRadius:9,background:`linear-gradient(135deg,${C.accent},${C.purple})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,flexShrink:0}}>◈</div>
@@ -1480,62 +1244,35 @@ ${issuesHTML}
             </div>
           </div>
           <div className="nav-actions" style={{display:"flex",gap:4,alignItems:"center",overflowX:"auto",flexShrink:1,minWidth:0}}>
+            {/* Year picker */}
             <div ref={yearMenuRef} style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>setShowYearMenu(p=>!p)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:9,border:`1px solid ${C.gold}88`,background:showYearMenu?`${C.gold}28`:`${C.gold}18`,color:C.gold,cursor:"pointer",fontWeight:800,fontSize:13,whiteSpace:"nowrap",transition:"background .15s"}}>
+              <button onClick={()=>setShowYearMenu(p=>!p)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:9,border:`1px solid ${C.gold}88`,background:showYearMenu?`${C.gold}28`:`${C.gold}18`,color:C.gold,cursor:"pointer",fontWeight:800,fontSize:13,whiteSpace:"nowrap"}}>
                 <span>FY {activeYear}</span>
                 <span style={{fontSize:10,marginLeft:2}}>{showYearMenu?"▲":"▼"}</span>
               </button>
               {showYearMenu&&(
-                <div style={{
-                  position:"fixed",
-                  top:(()=>{const el=yearMenuRef.current;if(!el)return 60;const r=el.getBoundingClientRect();return r.bottom+6;})(),
-                  left:(()=>{const el=yearMenuRef.current;if(!el)return 16;const r=el.getBoundingClientRect();return r.left;})(),
-                  background:"#1a1f35",
-                  border:`1px solid ${C.gold}55`,
-                  borderRadius:14,
-                  minWidth:230,
-                  boxShadow:"0 16px 48px rgba(0,0,0,.7)",
-                  zIndex:99999,
-                  overflow:"visible",
-                  animation:"fadeUp .12s ease"
-                }}>
+                <div style={{position:"fixed",top:(()=>{const el=yearMenuRef.current;if(!el)return 60;const r=el.getBoundingClientRect();return r.bottom+6;})(),left:(()=>{const el=yearMenuRef.current;if(!el)return 16;const r=el.getBoundingClientRect();return r.left;})(),background:"#1a1f35",border:`1px solid ${C.gold}55`,borderRadius:14,minWidth:230,boxShadow:"0 16px 48px rgba(0,0,0,.7)",zIndex:99999,animation:"fadeUp .12s ease"}}>
                   <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:10,color:C.gold,textTransform:"uppercase",letterSpacing:2,fontWeight:700}}>Fiscal Years</div>
                   {[...years].sort((a,b)=>b-a).map(y=>{
                     const yData=yearStore[y];
                     const hasData=((yData||{}).rows||[]).length>0||((yData||{}).issues||[]).length>0;
                     const isCurrent=y===activeYear;
-                    const isLatest=y===Math.max(...years);
                     return (
-                      <div key={y} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:isCurrent?`${C.gold}14`:"transparent",borderBottom:`1px solid ${C.border}33`,transition:"background .1s"}}>
-                        <button
-                          onClick={()=>{switchYear(y);setShowYearMenu(false);}}
-                          style={{flex:1,background:"none",border:"none",color:isCurrent?C.gold:"#e8eaf2",cursor:"pointer",fontWeight:isCurrent?800:600,fontSize:14,textAlign:"left",display:"flex",alignItems:"center",gap:8,padding:0}}
-                        >
+                      <div key={y} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:isCurrent?`${C.gold}14`:"transparent",borderBottom:`1px solid ${C.border}33`}}>
+                        <button onClick={()=>{switchYear(y);setShowYearMenu(false);}} style={{flex:1,background:"none",border:"none",color:isCurrent?C.gold:"#e8eaf2",cursor:"pointer",fontWeight:isCurrent?800:600,fontSize:14,textAlign:"left",display:"flex",alignItems:"center",gap:8,padding:0}}>
                           <span style={{fontSize:16}}>{isCurrent?"◉":"○"}</span>
                           <span>FY {y}</span>
                           {isCurrent&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:99,background:`${C.gold}22`,color:C.gold,fontWeight:700,border:`1px solid ${C.gold}44`}}>Active</span>}
-                          {isLatest&&!isCurrent&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:99,background:`${C.green}18`,color:C.green,fontWeight:700,border:`1px solid ${C.green}44`}}>Latest</span>}
                         </button>
-                        {hasData&&<span style={{fontSize:10,color:C.muted,flexShrink:0,background:`${C.border}`,padding:"2px 7px",borderRadius:99}}>{((yData||{}).rows||[]).length} KRs</span>}
+                        {hasData&&<span style={{fontSize:10,color:C.muted,flexShrink:0,background:C.border,padding:"2px 7px",borderRadius:99}}>{((yData||{}).rows||[]).length} KRs</span>}
                         {!hasData&&years.length>1&&(
-                          <button
-                            onClick={()=>deleteYear(y)}
-                            title={`Delete FY ${y}`}
-                            style={{background:"none",border:`1px solid ${C.red}55`,color:C.red,cursor:"pointer",fontSize:11,padding:"3px 8px",borderRadius:6,fontWeight:700,flexShrink:0,transition:"all .15s"}}
-                            onMouseEnter={e=>{e.currentTarget.style.background=C.red;e.currentTarget.style.color="#fff";}}
-                            onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.red;}}
-                          >✕ Delete</button>
+                          <button onClick={()=>deleteYear(y)} style={{background:"none",border:`1px solid ${C.red}55`,color:C.red,cursor:"pointer",fontSize:11,padding:"3px 8px",borderRadius:6,fontWeight:700,flexShrink:0}} onMouseEnter={e=>{e.currentTarget.style.background=C.red;e.currentTarget.style.color="#fff";}} onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.red;}}>✕</button>
                         )}
                       </div>
                     );
                   })}
                   <div style={{padding:"10px 14px",borderTop:`1px solid ${C.border}`}}>
-                    <button
-                      onClick={addYear}
-                      style={{width:"100%",padding:"10px 14px",borderRadius:9,border:`1px solid ${C.accent}66`,background:`linear-gradient(135deg,${C.accent}22,${C.purple}22)`,color:"#e8eaf2",cursor:"pointer",fontWeight:700,fontSize:13,textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center",gap:8,transition:"all .15s"}}
-                      onMouseEnter={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent},${C.purple})`;e.currentTarget.style.color="#fff";}}
-                      onMouseLeave={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent}22,${C.purple}22)`;e.currentTarget.style.color="#e8eaf2";}}
-                    >
+                    <button onClick={addYear} style={{width:"100%",padding:"10px 14px",borderRadius:9,border:`1px solid ${C.accent}66`,background:`linear-gradient(135deg,${C.accent}22,${C.purple}22)`,color:"#e8eaf2",cursor:"pointer",fontWeight:700,fontSize:13,textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center",gap:8}} onMouseEnter={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent},${C.purple})`;e.currentTarget.style.color="#fff";}} onMouseLeave={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent}22,${C.purple}22)`;e.currentTarget.style.color="#e8eaf2";}}>
                       <span style={{fontSize:16,fontWeight:900}}>+</span>
                       <span>Add FY {Math.max(...years)+1}</span>
                     </button>
@@ -1550,6 +1287,11 @@ ${issuesHTML}
               </button>
             ))}
             <div style={{width:1,height:20,background:C.border,flexShrink:0}}/>
+            {/* Firebase status indicator */}
+            <div title={fbStatus==="connected"?"Firebase: Connected":fbStatus==="local"?"Offline / localStorage only":"Firebase: Connecting..."} style={{display:"flex",alignItems:"center",gap:4,padding:"5px 8px",borderRadius:7,border:`1px solid ${fbStatus==="connected"?"#22d3a533":fbStatus==="error"?"#f75f5f33":"#6b739933"}`,background:"transparent",flexShrink:0}}>
+              <div style={{width:7,height:7,borderRadius:"50%",background:fbStatus==="connected"?"#22d3a5":fbStatus==="error"?"#f75f5f":"#f5a623",boxShadow:fbStatus==="connected"?"0 0 6px #22d3a5":""}}/>
+              <span className="nav-btn-text" style={{fontSize:10,fontWeight:700,color:fbStatus==="connected"?"#22d3a5":fbStatus==="error"?"#f75f5f":"#6b7399"}}>{fbStatus==="connected"?"Live":fbStatus==="local"?"Local":"…"}</span>
+            </div>
             <button onClick={exportPDF} title="Export PDF" style={{padding:"6px 10px",borderRadius:9,border:`1px solid ${C.gold}55`,background:`${C.gold}15`,color:C.gold,cursor:"pointer",fontWeight:700,fontSize:12,flexShrink:0}}>⬇<span className="nav-btn-text" style={{marginLeft:4}}>PDF</span></button>
             <div style={{width:1,height:20,background:C.border,flexShrink:0}}/>
             <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
@@ -1565,62 +1307,59 @@ ${issuesHTML}
         </nav>
 
         <div className="main-pad" style={{maxWidth:1340,margin:"0 auto",padding:"20px 14px"}}>
+
+          {/* ══════════════════ DASHBOARD ══════════════════ */}
           {view==="dashboard"&&(
             <div style={{display:"flex",flexDirection:"column",gap:24}}>
-              {(()=>{
-                const latestYear=Math.max(...years);
-                return (
-                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
-                    <div>
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        <h1 style={{fontSize:"clamp(20px,4vw,26px)",fontWeight:800}}>Overall KR Status</h1>
-                        <span style={{padding:"3px 12px",borderRadius:99,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,color:C.gold,fontWeight:800,fontSize:13}}>FY {activeYear}</span>
-                        {activeYear===latestYear&&<span style={{padding:"2px 10px",borderRadius:99,background:`${C.green}18`,border:`1px solid ${C.green}44`,color:C.green,fontWeight:700,fontSize:11}}>● Active</span>}
-                        {activeYear<latestYear&&<span style={{padding:"2px 10px",borderRadius:99,background:`${C.purple}22`,border:`1px solid ${C.purple}44`,color:C.purple,fontWeight:700,fontSize:11}}>📚 Historical</span>}
-                      </div>
-                      <p style={{fontSize:12,color:C.muted,marginTop:3}}>All KR targets at specified dates · {rows.length} KRs · {allDepts.length} departments</p>
-                    </div>
-                    {activeYear<latestYear&&(
-                      <button onClick={()=>switchYear(latestYear)} style={{padding:"8px 16px",borderRadius:9,border:`1px solid ${C.accent}55`,background:`${C.accent}15`,color:C.accent,cursor:"pointer",fontWeight:700,fontSize:12}}>→ Back to {latestYear}</button>
-                    )}
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <h1 style={{fontSize:"clamp(20px,4vw,26px)",fontWeight:800}}>Overall KR Status</h1>
+                    <span style={{padding:"3px 12px",borderRadius:99,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,color:C.gold,fontWeight:800,fontSize:13}}>FY {activeYear}</span>
                   </div>
-                );
-              })()}
+                  <p style={{fontSize:12,color:C.muted,marginTop:3}}>{rows.length} KRs · {allDepts.length} departments</p>
+                </div>
+              </div>
 
+              {/* Score hero */}
               <div className="hero-grid" style={{background:`linear-gradient(135deg,${C.card},#1a1f38)`,border:`1px solid ${C.accent}33`,borderRadius:18,padding:"24px 20px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:24,alignItems:"center"}}>
                 <div>
                   <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:2,marginBottom:8}}>Combined OKR Score</div>
                   <div style={{fontSize:"clamp(52px,10vw,84px)",fontWeight:800,fontFamily:"'Bebas Neue'",letterSpacing:2,color:rows.length?sc(ovPct):C.muted,lineHeight:1}}>{rows.length?ovPct.toFixed(1)+"%":"—"}</div>
                   <div style={{marginTop:10,marginBottom:14}}><Bar pct={ovPct} color={sc(ovPct)} h={10}/></div>
                   {rows.length>0&&<Badge score={ovPct}/>}
-                  <div style={{marginTop:10,fontSize:12,color:C.muted}}>{rows.length===0?"No data":<>Score <b style={{color:C.text}}>{totS.toFixed(1)}</b>/{totW} pts · {allDepts.length} Depts · {rows.length} KRs</>}</div>
+                  <div style={{marginTop:10,fontSize:12,color:C.muted}}>{rows.length===0?"No KRs yet — import or add your first KR in the KR Tracker.":<>Score <b style={{color:C.text}}>{totS.toFixed(1)}</b>/{totW} pts · {allDepts.length} Depts · {rows.length} KRs</>}</div>
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                  {[["On Track",rows.filter(r=>r.pct>=80).length,"KRs",C.green,"✓","on-track"],["At Risk",rows.filter(r=>r.pct>=60&&r.pct<80).length,"KRs",C.amber,"⚠","at-risk"],["Off Track",rows.filter(r=>r.pct<60).length,"KRs",C.red,"✕","off-track"],["Depts",allDepts.length,"Tracked",C.accent,"◈",null]].map(([l,v,s,col,ic,statusFilter])=>(
-                    <div key={l} onClick={()=>{ if(statusFilter){ setFilterType("ALL"); setSelDept(null); setStatusFilter(statusFilter); setView("tracker"); } }} style={{background:C.card,border:`1px solid ${statusFilter?"transparent":C.border}`,borderRadius:13,padding:"14px 16px",position:"relative",overflow:"hidden",cursor:statusFilter?"pointer":"default",outline:statusFilter?`1px solid ${col}44`:"none",transition:"transform .15s, box-shadow .15s"}}
-                      onMouseEnter={e=>{ if(statusFilter){e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow=`0 8px 24px ${col}33`;}}}
-                      onMouseLeave={e=>{ if(statusFilter){e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="none";}}}>
+                  {[["On Track",rows.filter(r=>r.pct>=80).length,"KRs",C.green,"✓","on-track"],["At Risk",rows.filter(r=>r.pct>=60&&r.pct<80).length,"KRs",C.amber,"⚠","at-risk"],["Off Track",rows.filter(r=>r.pct<60).length,"KRs",C.red,"✕","off-track"],["Depts",allDepts.length,"Tracked",C.accent,"◈",null]].map(([l,v,s,col,ic,sf])=>(
+                    <div key={l} onClick={()=>{ if(sf){ setFilterType("ALL"); setSelDept(null); setStatusFilter(sf); setView("tracker"); } }}
+                      style={{background:C.card,border:`1px solid ${sf?"transparent":C.border}`,borderRadius:13,padding:"14px 16px",position:"relative",overflow:"hidden",cursor:sf?"pointer":"default",outline:sf?`1px solid ${col}44`:"none",transition:"transform .15s, box-shadow .15s"}}
+                      onMouseEnter={e=>{ if(sf){e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow=`0 8px 24px ${col}33`;}}}
+                      onMouseLeave={e=>{ if(sf){e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="none";}}}>
                       <div style={{position:"absolute",top:-12,right:-8,fontSize:50,opacity:.04}}>{ic}</div>
                       <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700}}>{l}</div>
                       <div style={{fontSize:"clamp(24px,5vw,32px)",fontWeight:800,color:col,fontFamily:"'Bebas Neue'",lineHeight:1.1}}>{v}</div>
-                      <div style={{fontSize:11,color:C.muted}}>{s}{statusFilter&&<span style={{fontSize:9,color:col,marginLeft:6,fontWeight:700}}>→ View</span>}</div>
+                      <div style={{fontSize:11,color:C.muted}}>{s}{sf&&<span style={{fontSize:9,color:col,marginLeft:6,fontWeight:700}}>→ View</span>}</div>
                     </div>
                   ))}
                 </div>
               </div>
+
               {rows.length === 0 && (
                 <div style={{background:`linear-gradient(135deg,${C.card},#1a1f38)`,border:`2px dashed ${C.accent}44`,borderRadius:18,padding:"48px 24px",textAlign:"center"}}>
                   <div style={{fontSize:48,marginBottom:16}}>📋</div>
                   <div style={{fontSize:20,fontWeight:800,marginBottom:8}}>No KRs for FY {activeYear} yet</div>
-                  <div style={{fontSize:13,color:C.muted,marginBottom:24,maxWidth:420,margin:"0 auto 24px"}}>Start adding Key Results to track your organization's performance for this fiscal year.</div>
+                  <div style={{fontSize:13,color:C.muted,marginBottom:24,maxWidth:420,margin:"0 auto 24px"}}>Import a CSV or add KRs manually to start tracking your organization's performance.</div>
                   <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
                     <button onClick={()=>setView("tracker")} style={{padding:"12px 24px",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C.accent},${C.purple})`,color:"#fff",cursor:"pointer",fontWeight:700,fontSize:14,boxShadow:`0 4px 20px ${C.accent}44`}}>⊞ Go to KR Tracker →</button>
                     {!isReadOnly&&<button onClick={()=>setShowAdd(true)} style={{padding:"12px 24px",borderRadius:10,border:`1px solid ${C.accent}55`,background:`${C.accent}15`,color:C.accent,cursor:"pointer",fontWeight:700,fontSize:14}}>+ Add First KR</button>}
                   </div>
                 </div>
               )}
+
               {rows.length > 0 && (
                 <>
+                  {/* Department Rankings */}
                   {(()=>{
                     const RANK_PAGE_SIZE = 10;
                     const totalRankPages = Math.ceil(deptStats.length / RANK_PAGE_SIZE);
@@ -1632,7 +1371,7 @@ ${issuesHTML}
                         <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
                           <div>
                             <h2 style={{fontSize:14,fontWeight:800,margin:0}}>Department Rankings</h2>
-                            <p style={{fontSize:12,color:C.muted,margin:"2px 0 0"}}>Sorted by weighted achievement score · <span style={{color:C.accent}}>Click a department to view its KRs</span></p>
+                            <p style={{fontSize:12,color:C.muted,margin:"2px 0 0"}}>Click a department to view its KRs</p>
                           </div>
                           <div style={{fontSize:12,color:C.muted}}>{deptStats.length} departments</div>
                         </div>
@@ -1657,133 +1396,20 @@ ${issuesHTML}
                               </div>
                               <div className="dsk" style={{width:100,paddingRight:8}}><Bar pct={dept.pct} color={sc(dept.pct)} h={5}/></div>
                               <div style={{fontSize:20,fontWeight:800,fontFamily:"'Bebas Neue'",color:sc(dept.pct),flexShrink:0,minWidth:64,textAlign:"right"}}>{dept.pct.toFixed(1)}%</div>
-                              <div className="dsk" style={{fontSize:11,fontWeight:700,color:dc,flexShrink:0,minWidth:52}}>{dept.score.toFixed(1)}pts</div>
                               <div style={{flexShrink:0}}><Badge score={dept.pct}/></div>
                             </div>
                           );
                         })}
                         {totalRankPages > 1 && (
                           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",borderTop:`1px solid ${C.border}`,background:`${C.surface}88`,flexWrap:"wrap",gap:8}}>
-                            <div style={{fontSize:12,color:C.muted}}>
-                              <b style={{color:C.text}}>{pageStart+1}–{Math.min(pageStart+RANK_PAGE_SIZE,deptStats.length)}</b> of <b style={{color:C.text}}>{deptStats.length}</b> departments
-                            </div>
+                            <div style={{fontSize:12,color:C.muted}}><b style={{color:C.text}}>{pageStart+1}–{Math.min(pageStart+RANK_PAGE_SIZE,deptStats.length)}</b> of <b style={{color:C.text}}>{deptStats.length}</b> departments</div>
                             <div style={{display:"flex",gap:4,alignItems:"center"}}>
                               <button onClick={()=>setRankPage(p=>Math.max(1,p-1))} disabled={safeRankPage===1} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safeRankPage===1?C.border:C.muted,cursor:safeRankPage===1?"default":"pointer",fontSize:12,fontWeight:600}}>‹ Prev</button>
-                              {Array.from({length:totalRankPages},(_,i)=>i+1).map(n=>(
-                                <button key={n} onClick={()=>setRankPage(n)} style={{padding:"5px 9px",borderRadius:7,border:`1px solid ${n===safeRankPage?C.accent:C.border}`,background:n===safeRankPage?`${C.accent}22`:"transparent",color:n===safeRankPage?C.accent:C.muted,cursor:"pointer",fontWeight:n===safeRankPage?700:400,fontSize:12}}>{n}</button>
-                              ))}
+                              {Array.from({length:totalRankPages},(_,i)=>i+1).map(n=>(<button key={n} onClick={()=>setRankPage(n)} style={{padding:"5px 9px",borderRadius:7,border:`1px solid ${n===safeRankPage?C.accent:C.border}`,background:n===safeRankPage?`${C.accent}22`:"transparent",color:n===safeRankPage?C.accent:C.muted,cursor:"pointer",fontWeight:n===safeRankPage?700:400,fontSize:12}}>{n}</button>))}
                               <button onClick={()=>setRankPage(p=>Math.min(totalRankPages,p+1))} disabled={safeRankPage===totalRankPages} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safeRankPage===totalRankPages?C.border:C.muted,cursor:safeRankPage===totalRankPages?"default":"pointer",fontSize:12,fontWeight:600}}>Next ›</button>
                             </div>
                           </div>
                         )}
-                      </div>
-                    );
-                  })()}
-                  {/* Quarterly Submission Summary */}
-                  {(()=>{
-                    const quarters = ["Q1","Q2","Q3","Q4"];
-                    const depts = Object.entries(qStatus);
-                    const total = depts.length;
-                    if (!total) return null;
-                    const qStats = quarters.map(q => {
-                      const updated  = depts.filter(([,d]) => d[q]==="Updated").length;
-                      const ongoing  = depts.filter(([,d]) => d[q]==="Ongoing Update").length;
-                      const noUpdate = depts.filter(([,d]) => d[q]==="No Update").length;
-                      const pending  = depts.filter(([,d]) => !d[q]).length;
-                      const pct      = total > 0 ? Math.round((updated/total)*100) : 0;
-                      return {q, updated, ongoing, noUpdate, pending, pct};
-                    });
-                    const chiefGroups = [...new Set(depts.map(([,d])=>d.chief).filter(Boolean))].sort();
-                    const chiefStats  = chiefGroups.map(chief => {
-                      const cDepts = depts.filter(([,d])=>d.chief===chief);
-                      const cTotal = cDepts.length;
-                      return {
-                        chief, total: cTotal, col: CHIEF_COLORS[chief]||C.muted,
-                        qData: quarters.map(q => ({
-                          q,
-                          updated:  cDepts.filter(([,d])=>d[q]==="Updated").length,
-                          ongoing:  cDepts.filter(([,d])=>d[q]==="Ongoing Update").length,
-                          noUpdate: cDepts.filter(([,d])=>d[q]==="No Update").length,
-                          pending:  cDepts.filter(([,d])=>!d[q]).length,
-                        }))
-                      };
-                    });
-                    const currentQIdx = (()=>{ const m=new Date().getMonth(); if(m<3)return 0; if(m<6)return 1; if(m<9)return 2; return 3; })();
-                    return (
-                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-                        <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-                          <div>
-                            <h2 style={{fontSize:14,fontWeight:800,margin:0}}>📋 Quarterly Submission Status</h2>
-                            <p style={{fontSize:12,color:C.muted,margin:"2px 0 0"}}>{total} departments · FY {activeYear}</p>
-                          </div>
-                          <button onClick={()=>setView("quarterly")} style={{padding:"7px 14px",borderRadius:8,border:`1px solid ${C.accent}44`,background:`${C.accent}12`,color:C.accent,cursor:"pointer",fontWeight:700,fontSize:12}}>View Full Tracker →</button>
-                        </div>
-                        {/* Quarter tiles */}
-                        <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
-                          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
-                            {qStats.map(({q,updated,ongoing,noUpdate,pending,pct},qi)=>{
-                              const isCurrent=qi===currentQIdx, barCol=pct>=80?C.green:pct>=50?C.amber:C.red;
-                              return (
-                                <div key={q} style={{background:isCurrent?`${C.accent}0d`:C.surface,border:`1px solid ${isCurrent?C.accent+"55":C.border}`,borderRadius:12,padding:"12px 14px",position:"relative",overflow:"hidden"}}>
-                                  {isCurrent&&<div style={{position:"absolute",top:0,left:0,right:0,height:2,background:`linear-gradient(90deg,${C.accent},${C.purple})`}}/>}
-                                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                                    <span style={{fontSize:13,fontWeight:800,color:isCurrent?C.accent:C.text}}>{q}</span>
-                                    {isCurrent&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:99,background:`${C.accent}22`,color:C.accent,fontWeight:700,border:`1px solid ${C.accent}44`}}>Now</span>}
-                                  </div>
-                                  <div style={{fontSize:26,fontWeight:800,fontFamily:"'Bebas Neue'",color:barCol,lineHeight:1,marginBottom:6}}>{pct}%</div>
-                                  <div style={{height:4,background:C.border,borderRadius:99,overflow:"hidden",marginBottom:8}}>
-                                    <div style={{height:"100%",width:pct+"%",background:barCol,borderRadius:99}}/>
-                                  </div>
-                                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                                    {updated>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:C.green}}>✓ Updated</span><b style={{color:C.green}}>{updated}</b></div>}
-                                    {ongoing>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:C.amber}}>⟳ Ongoing</span><b style={{color:C.amber}}>{ongoing}</b></div>}
-                                    {noUpdate>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:C.red}}>✕ No Update</span><b style={{color:C.red}}>{noUpdate}</b></div>}
-                                    {pending>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:C.muted}}>— Pending</span><b style={{color:C.muted}}>{pending}</b></div>}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                        {/* Chief compliance table */}
-                        <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
-                          <table style={{width:"100%",borderCollapse:"collapse",minWidth:420}}>
-                            <thead>
-                              <tr style={{background:C.surface}}>
-                                <th style={{padding:"8px 16px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>Chief Group</th>
-                                <th style={{padding:"8px 10px",textAlign:"center",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`}}>Depts</th>
-                                {quarters.map((q,qi)=>(
-                                  <th key={q} style={{padding:"8px 10px",textAlign:"center",fontSize:10,color:qi===currentQIdx?C.accent:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{q}{qi===currentQIdx?" ★":""}</th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {chiefStats.map(({chief,total:cTotal,col,qData},idx)=>(
-                                <tr key={chief} style={{borderBottom:`1px solid ${C.border}22`,background:idx%2===0?"transparent":`${C.surface}44`}}>
-                                  <td style={{padding:"10px 16px"}}>
-                                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                                      <div style={{width:8,height:8,borderRadius:99,background:col,flexShrink:0}}/>
-                                      <span style={{fontSize:12,fontWeight:700,color:col}}>{chief}</span>
-                                    </div>
-                                  </td>
-                                  <td style={{padding:"10px 10px",textAlign:"center",fontSize:12,color:C.muted}}>{cTotal}</td>
-                                  {qData.map(({q,updated,ongoing,noUpdate},qi)=>{
-                                    const dot=updated===cTotal?C.green:ongoing>0?C.amber:noUpdate>0?C.red:C.muted;
-                                    const lbl=updated===cTotal?"All Updated":updated>0?updated+"/"+cTotal+" Updated":ongoing>0?"Ongoing":noUpdate>0?"No Update":"Pending";
-                                    return (
-                                      <td key={q} style={{padding:"10px 10px",textAlign:"center"}}>
-                                        <div style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 9px",borderRadius:99,background:`${dot}15`,border:`1px solid ${dot}33`}}>
-                                          <div style={{width:6,height:6,borderRadius:99,background:dot,flexShrink:0}}/>
-                                          <span style={{fontSize:10,fontWeight:700,color:dot,whiteSpace:"nowrap"}}>{lbl}</span>
-                                        </div>
-                                      </td>
-                                    );
-                                  })}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
                       </div>
                     );
                   })()}
@@ -1795,9 +1421,10 @@ ${issuesHTML}
                         <h2 style={{margin:0,fontSize:15,fontWeight:800}}>✦ AI Strategic Insights</h2>
                         <p style={{margin:"3px 0 0",fontSize:12,color:C.muted}}>Powered by Claude · {rows.length} KRs · {allDepts.length} departments</p>
                       </div>
-                      <button onClick={loadAI} disabled={loadingAI} style={{padding:"8px 16px",borderRadius:9,background:`${C.purple}22`,border:`1px solid ${C.purple}55`,color:C.purple,cursor:"pointer",fontWeight:700,fontSize:12}}>{loadingAI?"⟳ Analyzing...":"↺ Refresh"}</button>
+                      <button onClick={loadAI} disabled={loadingAI||rows.length===0} style={{padding:"8px 16px",borderRadius:9,background:`${C.purple}22`,border:`1px solid ${C.purple}55`,color:C.purple,cursor:"pointer",fontWeight:700,fontSize:12}}>{loadingAI?"⟳ Analyzing...":"↺ Refresh"}</button>
                     </div>
                     {loadingAI&&<div style={{display:"flex",gap:10,alignItems:"center",color:C.muted,padding:"16px 0"}}><div style={{width:16,height:16,border:`2px solid ${C.purple}44`,borderTopColor:C.purple,borderRadius:"50%",animation:"spin .8s linear infinite"}}/> Analyzing…</div>}
+                    {!loadingAI&&!insights&&rows.length>0&&<div style={{color:C.muted,fontSize:13,padding:"8px 0"}}>Click Refresh to generate AI insights for your current KR data.</div>}
                     {insights&&!insights.error&&(
                       <div style={{display:"flex",flexDirection:"column",gap:14}}>
                         <div className="ins-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
@@ -1813,22 +1440,22 @@ ${issuesHTML}
                         {insights.overallAssessment&&<div style={{background:`${C.accent}08`,border:`1px solid ${C.accent}22`,borderRadius:10,padding:14}}><span style={{fontSize:11,color:C.accent,fontWeight:700,marginRight:8}}>EXEC SUMMARY</span><span style={{fontSize:12,color:C.text,lineHeight:1.6}}>{insights.overallAssessment}</span></div>}
                       </div>
                     )}
-                    {insights && insights.error&&<div style={{color:C.red,fontSize:13}}>{insights.error}</div>}
+                    {insights&&insights.error&&<div style={{color:C.red,fontSize:13,background:`${C.red}12`,border:`1px solid ${C.red}33`,borderRadius:8,padding:"10px 14px"}}>{insights.error}</div>}
                   </div>
                 </>
               )}
             </div>
           )}
+
+          {/* ══════════════════ KR TRACKER ══════════════════ */}
           {view==="tracker"&&(
             <div>
-              <div style={{marginBottom:14,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:10}}>
-                    <h1 style={{fontSize:"clamp(18px,5vw,22px)",fontWeight:800}}>KR Tracker</h1>
-                    <span style={{padding:"3px 12px",borderRadius:99,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,color:C.gold,fontWeight:800,fontSize:13}}>FY {activeYear}</span>
-                  </div>
-                  <p style={{fontSize:12,color:C.muted,marginTop:3}}>{rows.length} KRs · {allDepts.length} departments · click any row to view, edit or delete</p>
+              <div style={{marginBottom:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <h1 style={{fontSize:"clamp(18px,5vw,22px)",fontWeight:800}}>KR Tracker</h1>
+                  <span style={{padding:"3px 12px",borderRadius:99,background:`${C.gold}22`,border:`1px solid ${C.gold}55`,color:C.gold,fontWeight:800,fontSize:13}}>FY {activeYear}</span>
                 </div>
+                <p style={{fontSize:12,color:C.muted,marginTop:3}}>{rows.length} KRs · {allDepts.length} departments · click any row to view, edit or delete</p>
               </div>
 
               <div className="tracker-toolbar" style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:13,padding:"11px 14px",marginBottom:16,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -1836,9 +1463,13 @@ ${issuesHTML}
                 {!isReadOnly&&<button onClick={()=>setShowImport(true)} style={{padding:"9px 15px",borderRadius:9,border:`1px solid ${C.green}55`,background:`${C.green}15`,color:C.green,cursor:"pointer",fontWeight:700,fontSize:12}}>📥 Import CSV</button>}
                 {!isReadOnly&&<><div style={{width:1,height:22,background:C.border,margin:"0 2px"}}/>
                 <button onClick={()=>setShowAdd(true)} style={{padding:"9px 15px",borderRadius:9,border:"none",background:`linear-gradient(135deg,${C.accent},${C.purple})`,color:"#fff",cursor:"pointer",fontWeight:700,fontSize:12,boxShadow:`0 3px 12px ${C.accent}44`}}>+ Add KR</button></>}
+                {rows.length > 0 && !isReadOnly && (
+                  <button onClick={()=>{ if(window.confirm(`Clear ALL ${rows.length} KRs for FY ${activeYear}? This cannot be undone.`)) { setRows([]); toast$("All KRs cleared.","warn"); }}} style={{marginLeft:"auto",padding:"9px 15px",borderRadius:9,border:`1px solid ${C.red}44`,background:`${C.red}10`,color:C.red,cursor:"pointer",fontWeight:700,fontSize:12}}>🗑 Clear All</button>
+                )}
                 {isReadOnly&&<span style={{marginLeft:"auto",fontSize:11,color:C.muted,fontStyle:"italic"}}>👁 View-only mode</span>}
               </div>
 
+              {/* Filter pills */}
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"13px 15px",marginBottom:14}}>
                 <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:2,fontWeight:700,marginBottom:10}}>Filter by Chief Group</div>
                 <div className="filter-pills" style={{display:"flex",gap:7,flexWrap:"wrap",alignItems:"center"}}>
@@ -1850,7 +1481,7 @@ ${issuesHTML}
                     return (
                       <button key={chief} onClick={()=>{if(filterType===chief){setFilterType("ALL");setSelDept(null);}else{setFilterType(chief);setSelDept(null);}setStatusFilter(null);}}
                         style={{padding:"6px 16px",borderRadius:99,border:`1px solid ${isActive?col:C.border}`,background:isActive?`${col}22`:"transparent",color:isActive?col:chiefHasData?C.muted:`${C.muted}44`,cursor:chiefHasData?"pointer":"default",fontWeight:700,fontSize:12,display:"inline-flex",alignItems:"center",gap:5,opacity:chiefHasData?1:0.4}}>
-                        {chief}{chiefHasData&&<span style={{fontSize:10,fontWeight:800,transform:isActive?"rotate(180deg)":"rotate(0deg)",transition:"transform .2s",display:"inline-block"}}>▾</span>}
+                        {chief}{chiefHasData&&<span style={{fontSize:10,fontWeight:800,display:"inline-block"}}>{isActive?"▲":"▾"}</span>}
                         {chiefHasData&&<span style={{fontSize:9,padding:"1px 5px",borderRadius:99,background:`${col}33`,color:col,fontWeight:700}}>{chiefDepts.length}</span>}
                       </button>
                     );
@@ -1876,6 +1507,7 @@ ${issuesHTML}
                 })()}
               </div>
 
+              {/* Summary bar */}
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",marginBottom:14,display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
                 <div><div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5}}>{filterType==="ALL"?"Overall":selDept?selDept:filterType}</div><div style={{fontSize:26,fontWeight:800,fontFamily:"'Bebas Neue'",color:visibleRows.length?sc(visPct):C.muted,letterSpacing:1}}>{visibleRows.length?visPct.toFixed(1)+"%":"—"}</div></div>
                 <div style={{flex:1,minWidth:100}}><Bar pct={visPct} color={sc(visPct)} h={10}/></div>
@@ -1895,28 +1527,26 @@ ${issuesHTML}
                 </div>
               )}
 
+              {visibleRows.length===0&&(
+                <div style={{background:C.card,border:`2px dashed ${C.border}`,borderRadius:12,padding:"40px 24px",textAlign:"center"}}>
+                  <div style={{fontSize:38,marginBottom:10}}>📭</div>
+                  <div style={{fontSize:15,fontWeight:700,marginBottom:5}}>{rows.length===0?"No KRs yet":"No KRs match this filter"}</div>
+                  {rows.length===0&&!isReadOnly&&<div style={{fontSize:12,color:C.muted}}>Click <b style={{color:C.green}}>📥 Import CSV</b> or <b style={{color:C.accent}}>+ Add KR</b> to get started.</div>}
+                </div>
+              )}
+
               {visibleRows.length>0&&(()=>{
                 const totalPages = Math.ceil(visibleRows.length / PAGE_SIZE);
                 const safePage = Math.min(trackerPage, totalPages);
                 const pageRows = visibleRows.slice((safePage-1)*PAGE_SIZE, safePage*PAGE_SIZE);
                 const PagBar = () => totalPages <= 1 ? null : (
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",borderTop:`1px solid ${C.border}`,background:`${C.surface}88`,flexWrap:"wrap",gap:8}}>
-                    <div style={{fontSize:12,color:C.muted}}>
-                      <b style={{color:C.text}}>{(safePage-1)*PAGE_SIZE+1}–{Math.min(safePage*PAGE_SIZE,visibleRows.length)}</b> of <b style={{color:C.text}}>{visibleRows.length}</b> KRs
-                    </div>
+                    <div style={{fontSize:12,color:C.muted}}><b style={{color:C.text}}>{(safePage-1)*PAGE_SIZE+1}–{Math.min(safePage*PAGE_SIZE,visibleRows.length)}</b> of <b style={{color:C.text}}>{visibleRows.length}</b> KRs</div>
                     <div style={{display:"flex",gap:4,alignItems:"center"}}>
                       <button onClick={()=>setTrackerPage(1)} disabled={safePage===1} style={{padding:"5px 8px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===1?C.border:C.muted,cursor:safePage===1?"default":"pointer",fontSize:12}}>«</button>
-                      <button onClick={()=>setTrackerPage(p=>Math.max(1,p-1))} disabled={safePage===1} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===1?C.border:C.muted,cursor:safePage===1?"default":"pointer",fontSize:12}}>‹ Prev</button>
-                      <div style={{display:"flex",gap:3}}>
-                        {Array.from({length:totalPages},(_,i)=>i+1).filter(n=>n===1||n===totalPages||Math.abs(n-safePage)<=1).reduce((acc,n,i,arr)=>{
-                          if(i>0&&n-arr[i-1]>1) acc.push("…");
-                          acc.push(n); return acc;
-                        },[]).map((n,i)=>typeof n==="string"
-                          ? <span key={i} style={{padding:"5px 4px",fontSize:12,color:C.muted}}>…</span>
-                          : <button key={n} onClick={()=>setTrackerPage(n)} style={{padding:"5px 9px",borderRadius:7,border:`1px solid ${n===safePage?C.accent:C.border}`,background:n===safePage?`${C.accent}22`:"transparent",color:n===safePage?C.accent:C.muted,cursor:"pointer",fontWeight:n===safePage?700:400,fontSize:12}}>{n}</button>
-                        )}
-                      </div>
-                      <button onClick={()=>setTrackerPage(p=>Math.min(totalPages,p+1))} disabled={safePage===totalPages} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===totalPages?C.border:C.muted,cursor:safePage===totalPages?"default":"pointer",fontSize:12}}>Next ›</button>
+                      <button onClick={()=>setTrackerPage(p=>Math.max(1,p-1))} disabled={safePage===1} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===1?C.border:C.muted,cursor:safePage===1?"default":"pointer",fontSize:12}}>‹</button>
+                      {Array.from({length:totalPages},(_,i)=>i+1).filter(n=>n===1||n===totalPages||Math.abs(n-safePage)<=1).reduce((acc,n,i,arr)=>{if(i>0&&n-arr[i-1]>1) acc.push("…");acc.push(n);return acc;},[]).map((n,i)=>typeof n==="string"?<span key={i} style={{padding:"5px 4px",fontSize:12,color:C.muted}}>…</span>:<button key={n} onClick={()=>setTrackerPage(n)} style={{padding:"5px 9px",borderRadius:7,border:`1px solid ${n===safePage?C.accent:C.border}`,background:n===safePage?`${C.accent}22`:"transparent",color:n===safePage?C.accent:C.muted,cursor:"pointer",fontWeight:n===safePage?700:400,fontSize:12}}>{n}</button>)}
+                      <button onClick={()=>setTrackerPage(p=>Math.min(totalPages,p+1))} disabled={safePage===totalPages} style={{padding:"5px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===totalPages?C.border:C.muted,cursor:safePage===totalPages?"default":"pointer",fontSize:12}}>›</button>
                       <button onClick={()=>setTrackerPage(totalPages)} disabled={safePage===totalPages} style={{padding:"5px 8px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safePage===totalPages?C.border:C.muted,cursor:safePage===totalPages?"default":"pointer",fontSize:12}}>»</button>
                     </div>
                   </div>
@@ -1942,9 +1572,7 @@ ${issuesHTML}
                             const isSel=selectedIds.has(row.id);
                             return (
                               <tr key={row.id} className="kr-row" style={{background:isSel?`${C.accent}12`:idx%2===0?"transparent":`${C.surface}44`,borderBottom:idx<pageRows.length-1?`1px solid ${C.border}`:"none",height:44}}>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={e=>e.stopPropagation()}>
-                                  <input type="checkbox" checked={isSel} onChange={e=>{const s=new Set(selectedIds); if(e.target.checked) s.add(row.id); else s.delete(row.id); setSelectedIds(s);}} style={{cursor:"pointer",accentColor:C.accent}}/>
-                                </td>
+                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={isSel} onChange={e=>{const s=new Set(selectedIds); if(e.target.checked) s.add(row.id); else s.delete(row.id); setSelectedIds(s);}} style={{cursor:"pointer",accentColor:C.accent}}/></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,padding:"2px 6px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700,whiteSpace:"nowrap"}}>{chief||"—"}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:99,background:dc,flexShrink:0}}/><span style={{fontSize:11,fontWeight:700,color:dc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.department}</span></div></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.keyResult}</span></td>
@@ -1973,11 +1601,13 @@ ${issuesHTML}
               })()}
             </div>
           )}
+
+          {/* ══════════════════ QUARTERLY ══════════════════ */}
           {view==="quarterly"&&(
             <div>
               <div style={{marginBottom:14}}>
                 <h1 style={{fontSize:"clamp(18px,5vw,22px)",fontWeight:800}}>Quarterly Status Submission</h1>
-                <p style={{fontSize:12,color:C.muted,marginTop:3}}>Track submission & review per department · click any cell to update</p>
+                <p style={{fontSize:12,color:C.muted,marginTop:3}}>Track submission & review per department · click any cell to update · FY {activeYear}</p>
               </div>
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:14}}>
                 <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`}}>
@@ -1991,24 +1621,26 @@ ${issuesHTML}
                           onBlur={e=>{setSchedule(p=>({...p,submission:{...p.submission,[q]:e.target.value}}));setEditSched(null);toast$("Date updated.");}}
                           onKeyDown={e=>{if(e.key==="Enter")e.target.blur();if(e.key==="Escape")setEditSched(null);}}
                           style={{width:"100%",background:C.surface,border:`1px solid ${C.accent}`,borderRadius:6,color:C.text,fontSize:10,padding:"3px 5px",textAlign:"center",outline:"none"}}/>)
-                        :(<div onClick={()=>setEditSched({type:"sub",quarter:q})} style={{fontSize:11,color:C.text,fontWeight:600,cursor:"pointer",padding:"3px 6px",borderRadius:5,border:"1px solid transparent",onMouseEnter:"",whiteSpace:"nowrap"}} onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent} onMouseLeave={e=>e.currentTarget.style.borderColor="transparent"}>{schedule.submission[q]||"—"}</div>)}
+                        :(<div onClick={()=>setEditSched({type:"sub",quarter:q})} style={{fontSize:11,color:C.text,fontWeight:600,cursor:"pointer",padding:"3px 6px",borderRadius:5,border:"1px solid transparent",whiteSpace:"nowrap"}} onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent} onMouseLeave={e=>e.currentTarget.style.borderColor="transparent"}>{schedule.submission[q]||"—"}</div>)}
                       </div>);
                     })}
                   </div>
                 </div>
               </div>
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflowX:"auto"}}>
-                <table style={{width:"100%",borderCollapse:"collapse",minWidth:800}}>
+                <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
                   <thead>
                     <tr style={{background:C.surface}}>
-                      <th style={{padding:"8px 12px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap",minWidth:160}}>Chief / Department</th>
+                      <th style={{padding:"8px 12px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",borderBottom:`1px solid ${C.border}`,minWidth:160}}>Chief / Department</th>
                       {["Q1","Q2","Q3","Q4"].map(q=>(
                         <th key={q} style={{padding:"8px 10px",textAlign:"center",fontSize:10,color:C.accent,fontWeight:800,textTransform:"uppercase",letterSpacing:1.5,borderBottom:`1px solid ${C.border}`}}>{q}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {Object.entries(qDeptsByChief).sort().map(([chief,depts])=>(
+                    {Object.entries(qDeptsByChief).length === 0 ? (
+                      <tr><td colSpan={5} style={{padding:"30px",textAlign:"center",color:C.muted,fontSize:13}}>No departments yet. Import or add KRs to populate the quarterly tracker.</td></tr>
+                    ) : Object.entries(qDeptsByChief).sort().map(([chief,depts])=>(
                       depts.map((row,di)=>{
                         const cc=CHIEF_COLORS[chief]||C.muted;
                         return (<tr key={row.dept} style={{borderBottom:`1px solid ${C.border}22`,background:di%2===0?"transparent":`${C.surface}44`}}>
@@ -2018,7 +1650,7 @@ ${issuesHTML}
                           </td>
                           {["Q1","Q2","Q3","Q4"].map(q=>{
                             const val=row[q]||"", col=ssColor(val), bg=ssBg(val);
-                            const isEd=(qEditCell||{}).dept===row.dept&&(qEditCell||{}).quarter===q&&(qEditCell||{}).field==="status";
+                            const isEd=(qEditCell||{}).dept===row.dept&&(qEditCell||{}).quarter===q;
                             return (<td key={q} style={{padding:"7px 8px",textAlign:"center",verticalAlign:"middle",borderLeft:`1px solid ${C.border}22`}}>
                               {isEd?(<select autoFocus value={val} onChange={e=>{updateQStatus(row.dept,q,e.target.value);}} onBlur={()=>setQEditCell(null)}
                                 style={{background:C.surface,border:`1px solid ${C.accent}`,borderRadius:6,color:C.text,fontSize:10,padding:"2px 4px",outline:"none"}}>
@@ -2037,11 +1669,12 @@ ${issuesHTML}
             </div>
           )}
 
-                    {view==="issues"&&(
+          {/* ══════════════════ ISSUES ══════════════════ */}
+          {view==="issues"&&(
             <div>
               <div style={{marginBottom:14}}>
                 <h1 style={{fontSize:"clamp(18px,5vw,22px)",fontWeight:800}}>Issues & Dependencies Tracker</h1>
-                <p style={{fontSize:12,color:C.muted,marginTop:3}}>Log issues, dependencies, assignments and track resolution · {issues.length} issue{issues.length!==1?"s":""} logged</p>
+                <p style={{fontSize:12,color:C.muted,marginTop:3}}>{issues.length} issue{issues.length!==1?"s":""} logged for FY {activeYear}</p>
               </div>
               {issues.length>0&&(
                 <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:14}}>
@@ -2050,7 +1683,7 @@ ${issuesHTML}
               )}
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:8}}>
                 <button onClick={()=>{setEditIssue(null);setShowIssueForm(true);}} style={{padding:"9px 16px",borderRadius:8,border:"none",background:`linear-gradient(135deg,${C.accent},${C.purple})`,color:"#fff",cursor:"pointer",fontWeight:700,fontSize:12,boxShadow:`0 2px 10px ${C.accent}44`}}>⚑ Log New Issue</button>
-                <span style={{fontSize:11,color:C.muted,marginLeft:"auto"}}>Open <b style={{color:C.red}}>{issues.filter(i=>i.status==="Open").length}</b> · In Progress <b style={{color:C.amber}}>{issues.filter(i=>i.status==="In Progress").length}</b> · Resolved <b style={{color:C.green}}>{issues.filter(i=>i.status==="Resolved"||i.status==="Closed").length}</b></span>
+                {issues.length>0&&<span style={{fontSize:11,color:C.muted,marginLeft:"auto"}}>Open <b style={{color:C.red}}>{issues.filter(i=>i.status==="Open").length}</b> · In Progress <b style={{color:C.amber}}>{issues.filter(i=>i.status==="In Progress").length}</b> · Resolved <b style={{color:C.green}}>{issues.filter(i=>i.status==="Resolved"||i.status==="Closed").length}</b></span>}
               </div>
               {issues.length===0?(
                 <div style={{background:C.card,border:`2px dashed ${C.border}`,borderRadius:12,padding:"40px 24px",textAlign:"center"}}>
@@ -2060,13 +1693,13 @@ ${issuesHTML}
                 </div>
               ):(
                 <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"collapse",minWidth:1000}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",minWidth:900}}>
                     <thead><tr style={{background:C.surface}}>{["#","Type","Issue / Description","Raised By","Assigned To","Status","Target Closure","Remarks",""].map(h=>(<th key={h} style={{padding:"9px 10px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>))}</tr></thead>
                     <tbody>
                       {issues.map((issue,idx)=>{
                         const ic=isColor(issue.status);
                         return (
-                          <tr key={issue.id} style={{borderBottom:idx<issues.length-1?`1px solid ${C.border}`:"none",background:idx%2===0?"transparent":`${C.surface}44`,cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background=`${C.accent}08`} onMouseLeave={e=>e.currentTarget.style.background=idx%2===0?"transparent":`${C.surface}44`}>
+                          <tr key={issue.id} style={{borderBottom:idx<issues.length-1?`1px solid ${C.border}`:"none",background:idx%2===0?"transparent":`${C.surface}44`}}>
                             <td style={{padding:"9px 10px",fontSize:11,color:C.muted,fontWeight:700,whiteSpace:"nowrap"}}>#{String(idx+1).padStart(3,"0")}</td>
                             <td style={{padding:"9px 8px",whiteSpace:"nowrap"}}><span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:`${C.purple}18`,color:C.purple,border:`1px solid ${C.purple}33`,fontWeight:700}}>{issue.type||"—"}</span></td>
                             <td style={{padding:"9px 10px",maxWidth:240}}><div style={{fontSize:12,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={issue.description}>{issue.description}</div><div style={{fontSize:10,color:C.muted,marginTop:2}}>Raised: {issue.createdAt||"—"}</div></td>
@@ -2086,110 +1719,83 @@ ${issuesHTML}
             </div>
           )}
 
+          {/* ══════════════════ HISTORY ══════════════════ */}
           {view==="history"&&(
-          <div>
-          <div style={{marginBottom:20}}>
-            <h1 style={{fontSize:"clamp(20px,4vw,26px)",fontWeight:800}}>Multi-Year OKR History</h1>
-            <p style={{fontSize:12,color:C.muted,marginTop:3}}>Year-over-year performance · click any year to open that year's dashboard</p>
-          </div>
-          <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:18,padding:"24px",marginBottom:20}}>
-            <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:2,marginBottom:20,fontWeight:700}}>Combined OKR Score — Year over Year</div>
-            <div style={{display:"flex",gap:20,alignItems:"flex-end",height:200,paddingBottom:8}}>
-              {historyData.map((yd,i)=>{
-                const col=sc(yd.pct), isCurrent=yd.year===CURRENT_YEAR;
-                const prev=i>0?historyData[i-1].pct:null;
-                const delta=prev!==null?yd.pct-prev:null;
-                return (<div key={yd.year} onClick={()=>switchYear(yd.year)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",cursor:"pointer"}}>
-                  <div style={{fontSize:11,fontWeight:700,color:delta===null?C.muted:delta>=0?C.green:C.red,marginBottom:6,height:18}}>
-                    {delta!==null&&(delta>=0?"▲ ":"▼ ")+Math.abs(delta).toFixed(1)+"%"}
-                  </div>
-                  <div style={{width:"100%",flex:1,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-                    <div style={{width:"80%",height:`${Math.max(yd.pct,4)}%`,background:`linear-gradient(180deg,${col}55,${col})`,borderRadius:"8px 8px 0 0",border:`2px solid ${col}44`,position:"relative"}}>
-                      <div style={{position:"absolute",top:-26,left:"50%",transform:"translateX(-50%)",fontSize:15,fontWeight:800,fontFamily:"'Bebas Neue'",color:col,whiteSpace:"nowrap"}}>{yd.pct.toFixed(1)}%</div>
+            <div>
+              <div style={{marginBottom:20}}>
+                <h1 style={{fontSize:"clamp(20px,4vw,26px)",fontWeight:800}}>Multi-Year OKR History</h1>
+                <p style={{fontSize:12,color:C.muted,marginTop:3}}>Year-over-year performance · click any year to open its dashboard</p>
+              </div>
+              {years.length === 1 && rows.length === 0 ? (
+                <div style={{background:C.card,border:`2px dashed ${C.border}`,borderRadius:12,padding:"40px 24px",textAlign:"center"}}>
+                  <div style={{fontSize:38,marginBottom:10}}>📈</div>
+                  <div style={{fontSize:15,fontWeight:700,marginBottom:5}}>No historical data yet</div>
+                  <div style={{fontSize:12,color:C.muted}}>Add KRs to FY {activeYear} and use the year picker to add future years.</div>
+                </div>
+              ) : (
+                <>
+                  <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:18,padding:"24px",marginBottom:20}}>
+                    <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:2,marginBottom:20,fontWeight:700}}>Combined OKR Score — Year over Year</div>
+                    <div style={{display:"flex",gap:20,alignItems:"flex-end",height:200,paddingBottom:8}}>
+                      {historyData.map((yd,i)=>{
+                        const col=sc(yd.pct), isCurrent=yd.year===activeYear;
+                        const prev=i>0?historyData[i-1].pct:null;
+                        const delta=prev!==null?yd.pct-prev:null;
+                        return (<div key={yd.year} onClick={()=>switchYear(yd.year)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",cursor:"pointer"}}>
+                          <div style={{fontSize:11,fontWeight:700,color:delta===null?C.muted:delta>=0?C.green:C.red,marginBottom:6,height:18}}>{delta!==null&&(delta>=0?"▲ ":"▼ ")+Math.abs(delta).toFixed(1)+"%"}</div>
+                          <div style={{width:"100%",flex:1,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+                            <div style={{width:"80%",height:yd.pct>0?`${Math.max(yd.pct,4)}%`:"4%",background:yd.pct>0?`linear-gradient(180deg,${col}55,${col})`:`${C.border}`,borderRadius:"8px 8px 0 0",border:`2px solid ${yd.pct>0?col+"44":C.border}`,position:"relative"}}>
+                              {yd.pct>0&&<div style={{position:"absolute",top:-26,left:"50%",transform:"translateX(-50%)",fontSize:15,fontWeight:800,fontFamily:"'Bebas Neue'",color:col,whiteSpace:"nowrap"}}>{yd.pct.toFixed(1)}%</div>}
+                            </div>
+                          </div>
+                          <div style={{marginTop:8,textAlign:"center"}}>
+                            <div style={{fontSize:16,fontWeight:800,fontFamily:"'Bebas Neue'",color:isCurrent?C.gold:C.text}}>{yd.year}</div>
+                            <div style={{fontSize:10,color:C.muted}}>{yd.krs} KRs</div>
+                          </div>
+                        </div>);
+                      })}
                     </div>
                   </div>
-                  <div style={{marginTop:8,textAlign:"center"}}>
-                    <div style={{fontSize:16,fontWeight:800,fontFamily:"'Bebas Neue'",color:isCurrent?C.gold:C.text}}>{yd.year}</div>
-                    <div style={{fontSize:10,color:C.muted}}>{yd.krs} KRs</div>
+                  <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
+                    <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`}}><div style={{fontSize:13,fontWeight:800}}>Year-over-Year Summary</div></div>
+                    <table style={{width:"100%",borderCollapse:"collapse"}}>
+                      <thead><tr style={{background:C.surface}}>{["Fiscal Year","Score","Status","On Track","At Risk","Off Track","KRs","YoY Change",""].map(h=><th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {[...historyData].reverse().map((yd,i,arr)=>{
+                          const prev=arr[i+1], delta=prev?yd.pct-prev.pct:null, isCurrent=yd.year===activeYear;
+                          return (<tr key={yd.year} onClick={()=>switchYear(yd.year)} style={{borderBottom:`1px solid ${C.border}`,cursor:"pointer",background:isCurrent?`${C.gold}08`:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${C.accent}0a`} onMouseLeave={e=>e.currentTarget.style.background=isCurrent?`${C.gold}08`:"transparent"}>
+                            <td style={{padding:"12px 14px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:17,fontWeight:800,fontFamily:"'Bebas Neue'",color:isCurrent?C.gold:C.text}}>FY {yd.year}</span>{isCurrent&&<span style={{fontSize:9,padding:"1px 7px",borderRadius:99,background:`${C.gold}22`,color:C.gold,fontWeight:700,border:`1px solid ${C.gold}44`}}>ACTIVE</span>}</div></td>
+                            <td style={{padding:"12px 14px"}}><span style={{fontSize:22,fontWeight:800,fontFamily:"'Bebas Neue'",color:yd.krs>0?sc(yd.pct):C.muted}}>{yd.krs>0?yd.pct.toFixed(1)+"%":"—"}</span></td>
+                            <td style={{padding:"12px 14px"}}>{yd.krs>0?<Badge score={yd.pct}/>:<span style={{fontSize:11,color:C.muted}}>No data</span>}</td>
+                            <td style={{padding:"12px 14px",fontWeight:700,color:C.green,fontSize:14}}>{yd.onTrack}</td>
+                            <td style={{padding:"12px 14px",fontWeight:700,color:C.amber,fontSize:14}}>{yd.atRisk}</td>
+                            <td style={{padding:"12px 14px",fontWeight:700,color:C.red,fontSize:14}}>{yd.offTrack}</td>
+                            <td style={{padding:"12px 14px",fontSize:12,color:C.muted}}>{yd.krs}</td>
+                            <td style={{padding:"12px 14px"}}>{delta!==null&&yd.krs>0?<span style={{fontWeight:700,color:delta>=0?C.green:C.red,fontSize:13}}>{delta>=0?"▲":"▼"} {Math.abs(delta).toFixed(1)}%</span>:<span style={{color:C.muted,fontSize:12}}>—</span>}</td>
+                            <td style={{padding:"12px 14px",fontSize:11,color:C.accent,fontWeight:600}}>Open →</td>
+                          </tr>);
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                </div>);
-              })}
+                </>
+              )}
             </div>
-          </div>
-          <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden",marginBottom:20}}>
-            <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`}}>
-              <div style={{fontSize:13,fontWeight:800}}>Year-over-Year Summary</div>
-            </div>
-            <table style={{width:"100%",borderCollapse:"collapse"}}>
-              <thead><tr style={{background:C.surface}}>{["Fiscal Year","Score","Status","On Track","At Risk","Off Track","KRs","YoY Change",""].map(h=><th key={h} style={{padding:"9px 14px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
-              <tbody>
-                {[...historyData].reverse().map((yd,i,arr)=>{
-                  const prev=arr[i+1], delta=prev?yd.pct-prev.pct:null, isCurrent=yd.year===CURRENT_YEAR;
-                  return (<tr key={yd.year} onClick={()=>switchYear(yd.year)} style={{borderBottom:`1px solid ${C.border}`,cursor:"pointer",background:isCurrent?`${C.gold}08`:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${C.accent}0a`} onMouseLeave={e=>e.currentTarget.style.background=isCurrent?`${C.gold}08`:"transparent"}>
-                    <td style={{padding:"12px 14px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:17,fontWeight:800,fontFamily:"'Bebas Neue'",color:isCurrent?C.gold:C.text}}>FY {yd.year}</span>{isCurrent&&<span style={{fontSize:9,padding:"1px 7px",borderRadius:99,background:`${C.gold}22`,color:C.gold,fontWeight:700,border:`1px solid ${C.gold}44`}}>CURRENT</span>}</div></td>
-                    <td style={{padding:"12px 14px"}}><span style={{fontSize:22,fontWeight:800,fontFamily:"'Bebas Neue'",color:sc(yd.pct)}}>{yd.pct.toFixed(1)}%</span></td>
-                    <td style={{padding:"12px 14px"}}><Badge score={yd.pct}/></td>
-                    <td style={{padding:"12px 14px",fontWeight:700,color:C.green,fontSize:14}}>{yd.onTrack}</td>
-                    <td style={{padding:"12px 14px",fontWeight:700,color:C.amber,fontSize:14}}>{yd.atRisk}</td>
-                    <td style={{padding:"12px 14px",fontWeight:700,color:C.red,fontSize:14}}>{yd.offTrack}</td>
-                    <td style={{padding:"12px 14px",fontSize:12,color:C.muted}}>{yd.krs}</td>
-                    <td style={{padding:"12px 14px"}}>{delta!==null?<span style={{fontWeight:700,color:delta>=0?C.green:C.red,fontSize:13}}>{delta>=0?"▲":"▼"} {Math.abs(delta).toFixed(1)}%</span>:<span style={{color:C.muted,fontSize:12}}>Base Year</span>}</td>
-                    <td style={{padding:"12px 14px",fontSize:11,color:C.accent,fontWeight:600}}>Open →</td>
-                  </tr>);
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-            <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`}}>
-              <div style={{fontSize:13,fontWeight:800}}>Department Performance History</div>
-            </div>
-            <div style={{overflowX:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",minWidth:400}}>
-                <thead><tr style={{background:C.surface}}>
-                  <th style={{padding:"8px 14px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,minWidth:180}}>Department</th>
-                  <th style={{padding:"8px 14px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`}}>Chief</th>
-                  {years.map(y=><th key={y} style={{padding:"8px 14px",textAlign:"left",fontSize:10,color:y===CURRENT_YEAR?C.gold:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>FY {y}{y===CURRENT_YEAR?" ★":""}</th>)}
-                  <th style={{padding:"8px 14px",textAlign:"left",fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`}}>Trend</th>
-                </tr></thead>
-                <tbody>
-                  {(()=>{
-                    const allDeptNames=[...new Set(years.flatMap(y=>((yearStore[y]||{}).rows||[]).map(r=>r.department)))].sort();
-                    return allDeptNames.map((dname,idx)=>{
-                      const yearPcts=years.map(y=>{const yr=((yearStore[y]||{}).rows||[]).filter(r=>r.department===dname);if(!yr.length)return null;const w=yr.reduce((s,r)=>s+r.weight,0),s2=yr.reduce((s,r)=>s+r.scoreEquivalent,0);return w>0?(s2/w)*100:0;});
-                      const chief=years.map(y=>{ const r2=((yearStore[y]||{}).rows||[]).find(r=>r.department===dname); return r2 ? r2.chiefGroup : null; }).find(Boolean)||"—";
-                      const validP=yearPcts.filter(p=>p!==null);
-                      const trend=validP.length>=2?validP[validP.length-1]-validP[validP.length-2]:null;
-                      const dc=PALETTE[idx%PALETTE.length], cc=CHIEF_COLORS[chief]||C.muted;
-                      return (<tr key={dname} style={{borderBottom:`1px solid ${C.border}22`,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${dc}0a`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <td style={{padding:"9px 14px"}}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:7,height:7,borderRadius:99,background:dc,flexShrink:0}}/><span style={{fontSize:12,fontWeight:700,color:dc}}>{dname}</span></div></td>
-                        <td style={{padding:"9px 14px"}}><span style={{fontSize:10,padding:"1px 7px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700}}>{chief}</span></td>
-                        {years.map((y,yi)=>{const p=yearPcts[yi];if(p===null)return <td key={y} style={{padding:"9px 14px",color:C.muted,fontSize:12}}>—</td>;return <td key={y} style={{padding:"9px 14px"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:14,fontWeight:800,color:sc(p),fontFamily:"'Bebas Neue'"}}>{p.toFixed(1)}%</span><div style={{width:44,height:5,background:C.border,borderRadius:99,overflow:"hidden"}}><div style={{width:`${Math.min(p,100)}%`,height:"100%",background:sc(p),borderRadius:99}}/></div></div></td>;})}
-                        <td style={{padding:"9px 14px"}}>{trend!==null?<span style={{fontSize:12,fontWeight:700,color:trend>=0?C.green:C.red}}>{trend>=0?"▲":"▼"} {Math.abs(trend).toFixed(1)}%</span>:<span style={{color:C.muted,fontSize:11}}>—</span>}</td>
-                      </tr>);
-                    });
-                  })()}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          </div>
-      )}
+          )}
 
         </div>
       </div>
 
-            {showIssueForm&&<IssueFormModal issue={editIssue} deptList={ALL_DEPTS_LIST} onClose={()=>{setShowIssueForm(false);setEditIssue(null);}} onSave={saveIssue}/>}
+      {showIssueForm&&<IssueFormModal issue={editIssue} deptList={ALL_DEPTS_LIST} onClose={()=>{setShowIssueForm(false);setEditIssue(null);}} onSave={saveIssue}/>}
       {showImport&&<ImportModal onParsed={handleParsed} onClose={()=>setShowImport(false)}/>}
       {previewData&&<PreviewModal preview={previewData.rows} existing={rows} errors={previewData.errors} onClose={()=>setPreviewData(null)} onConfirm={handleImportConfirm}/>}
       {showAdd&&<AddKRModal onClose={()=>setShowAdd(false)} onSave={handleAdd}/>}
       {detailRow&&<KRDetailModal row={detailRow} onClose={()=>setDetailRow(null)} onSave={handleUpdate} onDelete={handleDelete} readOnly={isReadOnly}/>}
       {showTemplate&&<TemplateModal onClose={()=>setShowTemplate(false)}/>}
-      {showUserMgmt&&<UserMgmtModal users={users} onClose={()=>setShowUserMgmt(false)} onSave={list=>{onUsersChange(list);setShowUserMgmt(false);toast$("Users updated.");}}/>}
+      {showUserMgmt&&<UserMgmtModal users={users} onClose={()=>setShowUserMgmt(false)} onSave={list=>{onUsersChange(list);setShowUserMgmt(false);toast$("Users saved.");}}/>}
     </>
   );
 }
-
 
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(AuthGate));
