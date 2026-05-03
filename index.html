@@ -982,7 +982,15 @@ const OFFICIAL_DEPTS = new Set([
 ]);
 
 // Also accept trimmed variants (e.g. "Supply Chain " with trailing space from old data)
-const isDeptOfficial = (dept) => OFFICIAL_DEPTS.has(dept) || OFFICIAL_DEPTS.has(dept.trim());
+const isDeptOfficial = (dept) => {
+  const t = (dept||"").trim();
+  // Reject if trimmed name is not in official set
+  if (!OFFICIAL_DEPTS.has(t)) return false;
+  // Also reject known typos even if they somehow match after trim
+  const typos = ["Mainatenance","Governance and compliance","Customer Helpdesk",
+                 "Supply Chain Management","Audit","SRE"];
+  return !typos.includes(t);
+};
 
 const cleanStaleQStatus = (qStatus) => {
   const cleaned = {};
@@ -1118,16 +1126,36 @@ function App({ authUser, users, onUsersChange, onLogout }) {
           // Permanently delete stale dept keys directly from Firebase
           // then overwrite each year doc with clean data
           const staleNames = [
-            "Customer Helpdesk","Governance, Risk and Compliance Department",
-            "Supply Chain Management","Mainatenance","Audit","SRE",
-            "Strategic Planning and Execution","Engineering Department",
-            "Human Capital Department","Administration Division",
-            "Supply Chain Management Division","Safety and Security Division",
-            "BusDev Department","Software Development Department",
-            "Accounting and Finance (EMSI) ",  // trailing space variant
-            "Supply Chain ",                   // trailing space variant
-            "Finance Operations ",             // trailing space variants
+            // Confirmed dirty from Firebase console
+            "Mainatenance",           // typo
+            "Governance and compliance", // wrong name
+            // Other known dirty entries
+            "Customer Helpdesk",
+            "Governance, Risk and Compliance Department",
+            "Supply Chain Management",
+            "Audit",
+            "SRE",
+            "Engineering Department",
+            "Human Capital Department",
+            "Administration Division",
+            "Supply Chain Management Division",
+            "Safety and Security Division",
+            "BusDev Department",
+            "Software Development Department",
+            "Strategic Planning and Execution",  // old name before rename
+            // Trailing space variants (caused by CSV imports)
+            "Accounting and Finance (EMSI) ",
+            "Supply Chain ",
+            "Finance Operations ",
             "Reconciliation ",
+            "Maintenance ",
+            "Mainatenance ",
+            "Legal ",
+            "Marketing ",
+            "Admin ",
+            "Engineering ",
+            "PMO ",
+            "Collection ",
           ];
           Object.keys(result.yearStore).forEach(year => {
             staleNames.forEach(bad => {
@@ -1357,7 +1385,14 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const qDeptsByChief = useMemo(()=>{
     const map={};
-    Object.entries(qStatus).forEach(([dept,data])=>{ const c=data.chief||"Other"; if(!map[c]) map[c]=[]; map[c].push({dept,...data}); });
+    Object.entries(qStatus).forEach(([dept,data])=>{
+      // Skip any department not in the official list — render-time safety net
+      if (!isDeptOfficial(dept)) return;
+      // Always use the correct chief from CHIEFS_GROUPS, ignore stored value
+      const c = getChief(dept.trim(), data.chief||"Other");
+      if(!map[c]) map[c]=[];
+      map[c].push({dept:dept.trim(),...data,chief:c});
+    });
     return map;
   },[qStatus]);
 
