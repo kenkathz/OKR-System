@@ -12,13 +12,14 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <!-- Firebase v10 compat CDN (works without build tools) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
   <script>
     // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────────────
-    // Get this from: Firebase Console → Project Settings → Your apps → SDK setup
+    // Firebase Console → Project Settings → Your apps → SDK setup → Config
     const FIREBASE_CONFIG = {
       apiKey:            "YOUR_API_KEY",
       authDomain:        "YOUR_PROJECT.firebaseapp.com",
+      databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
       projectId:         "YOUR_PROJECT_ID",
       storageBucket:     "YOUR_PROJECT.appspot.com",
       messagingSenderId: "YOUR_SENDER_ID",
@@ -32,17 +33,16 @@
     try {
       if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY") {
         firebase.initializeApp(FIREBASE_CONFIG);
-        _db = firebase.firestore();
+        _db = firebase.database();
         _firebaseReady = true;
-        console.log("✅ Firebase connected");
+        console.log("✅ Firebase Realtime Database connected");
       } else {
-        console.warn("⚠️ Firebase config not set — using localStorage only. Fill in FIREBASE_CONFIG above.");
+        console.warn("⚠️ Firebase config not set — using localStorage only.");
       }
     } catch(e) {
       console.error("Firebase init failed:", e);
     }
 
-    // Expose globally for use in React
     window.__db = _db;
     window.__firebaseReady = _firebaseReady;
   </script>
@@ -66,15 +66,15 @@
   <div id="root"></div>
   <script type="text/babel">
 
-// ─── STORAGE LAYER: Firebase Firestore + localStorage fallback ───────────────
-//  Firestore doc layout (collection: "okr_app"):
-//    users        → { list: [...] }
-//    years        → { list: [2026, 2027] }
-//    year_2026    → { rows, qStatus, schedule, issues }
+// ─── STORAGE LAYER: Firebase Realtime Database + localStorage fallback ─────────
+//  RTDB path layout:
+//    okr/users          → [ ...user objects ]
+//    okr/years          → [ 2026, 2027, ... ]
+//    okr/year_2026      → { rows, qStatus, schedule, issues }
 //
-const DB_COL = "okr_app";
-const db     = window.__db;
-const USE_FB = window.__firebaseReady;
+const DB_ROOT = "okr";
+const db      = window.__db;
+const USE_FB  = window.__firebaseReady;
 
 const LS_KEYS = {
   yearStore: "okr_yearStore",
@@ -89,39 +89,61 @@ const lsLoad = (key, fallback) => {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch(e) { return fallback; }
 };
 
-const fbSet = async (docId, data) => {
+// ── Realtime Database helpers ─────────────────────────────────────────────────
+const rtSet = async (path, data) => {
   if (!USE_FB) return;
-  try { await db.collection(DB_COL).doc(docId).set(data, { merge: true }); }
-  catch(e) { console.warn("Firestore write failed:", e); }
+  try { await db.ref(DB_ROOT + "/" + path).set(data); }
+  catch(e) { console.warn("RTDB write failed:", e); }
 };
-const fbGet = async (docId) => {
+const rtGet = async (path) => {
   if (!USE_FB) return null;
-  try { const s = await db.collection(DB_COL).doc(docId).get(); return s.exists ? s.data() : null; }
-  catch(e) { console.warn("Firestore read failed:", e); return null; }
+  try { const snap = await db.ref(DB_ROOT + "/" + path).once("value"); return snap.val(); }
+  catch(e) { console.warn("RTDB read failed:", e); return null; }
 };
 
-const saveUsers = async (users) => { lsSave(LS_KEYS.users, users); await fbSet("users", { list: users }); };
-const saveYears = async (years) => { lsSave(LS_KEYS.years, years); await fbSet("years", { list: years }); };
+// ── Unified save functions ────────────────────────────────────────────────────
+const saveUsers = async (users) => {
+  lsSave(LS_KEYS.users, users);
+  await rtSet("users", users);
+};
+const saveYears = async (years) => {
+  lsSave(LS_KEYS.years, years);
+  await rtSet("years", years);
+};
 const saveYearData = async (year, data) => {
   const cached = lsLoad(LS_KEYS.yearStore, {});
   lsSave(LS_KEYS.yearStore, { ...cached, [year]: data });
-  await fbSet("year_" + year, data);
+  // Strip undefined values — RTDB does not accept undefined
+  const clean = JSON.parse(JSON.stringify(data));
+  await rtSet("year_" + year, clean);
 };
 
+// ── Load everything from RTDB on startup ──────────────────────────────────────
 const loadAllFromFirebase = async () => {
   if (!USE_FB) return null;
   try {
-    const [usersSnap, yearsSnap] = await Promise.all([fbGet("users"), fbGet("years")]);
-    const years = yearsSnap ? yearsSnap.list : null;
+    const snap = await db.ref(DB_ROOT).once("value");
+    const root = snap.val();
+    if (!root) return null;
+
+    const users     = root.users || null;
+    const years     = root.years || null;
     if (!years || !years.length) return null;
-    const yearDocs = await Promise.all(years.map(y => fbGet("year_" + y)));
+
     const yearStore = {};
-    years.forEach((y, i) => {
-      yearStore[y] = yearDocs[i] || mkEmptyYearData(y);
-      if (yearStore[y].rows) yearStore[y].rows = yearStore[y].rows.map(r => compute(r));
+    years.forEach(y => {
+      const ydata = root["year_" + y] || mkEmptyYearData(y);
+      yearStore[y] = {
+        ...ydata,
+        rows: (ydata.rows || []).map(r => compute(r)),
+      };
     });
-    return { users: usersSnap ? usersSnap.list : null, years, yearStore };
-  } catch(e) { console.warn("Firebase load failed, using cache:", e); return null; }
+
+    return { users, years, yearStore };
+  } catch(e) {
+    console.warn("Firebase load failed, using localStorage cache:", e);
+    return null;
+  }
 };
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
