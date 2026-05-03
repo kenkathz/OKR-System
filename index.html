@@ -965,16 +965,24 @@ const OFFICIAL_DEPTS = new Set([
   "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
   "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
-  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
+  "Accounting and Finance (INC)","Accounting and Finance (EMSI)","Accounting and Finance (SOL)",
   "Cash Logistics","Finance Operations","Cash Management","Maintenance",
   "Financial Data Management Support","Collection","Reconciliation",
 ]);
 
+// Also accept trimmed variants (e.g. "Supply Chain " with trailing space from old data)
+const isDeptOfficial = (dept) => OFFICIAL_DEPTS.has(dept) || OFFICIAL_DEPTS.has(dept.trim());
+
 const cleanStaleQStatus = (qStatus) => {
   const cleaned = {};
   Object.entries(qStatus).forEach(([dept, data]) => {
-    if (OFFICIAL_DEPTS.has(dept)) cleaned[dept] = data;
-    else console.log("🧹 Removed stale dept from qStatus:", dept);
+    const trimmed = dept.trim();
+    if (isDeptOfficial(dept)) {
+      // Normalise key to trimmed version in case Firebase has trailing spaces
+      cleaned[trimmed] = { ...data, chief: data.chief || "Other" };
+    } else {
+      console.log("🧹 Removed stale dept:", JSON.stringify(dept));
+    }
   });
   return cleaned;
 };
@@ -1095,6 +1103,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
           const cleanedStore = cleanYearStore(result.yearStore);
           setYearStore(cleanedStore);
           lsSave(LS_KEYS.yearStore, cleanedStore);
+          // Write cleaned data back to Firebase to permanently remove stale depts
+          Object.entries(cleanedStore).forEach(([year, data]) => {
+            saveYearData(Number(year), data);
+          });
           // Switch to latest year
           const latestYear = Math.max(...result.years);
           setActiveYear(latestYear);
