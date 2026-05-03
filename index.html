@@ -178,8 +178,8 @@ const DEPT_LIST = [
   "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
   "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
-  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
-  "Cash Logistics","Finance Operations","Cash Management","Maintenance",
+  "Accounting and Finance (INC)","Accounting and Finance (SOL)",
+  "Accounting and Finance (EMSI)","Cash Logistics","Finance Operations","Cash Management","Maintenance",
   "Financial Data Management Support","Collection","Reconciliation",
 ];
 
@@ -398,11 +398,42 @@ function UserMgmtModal({ users, onClose, onSave }) {
   );
 }
 
+// ─── SESSION STORAGE KEY ─────────────────────────────────────────────────────
+const SESSION_KEY     = "okr_session";
+const INACTIVITY_MS   = 10 * 60 * 1000; // 10 minutes
+
+const saveSession = (authUser) => {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+      authUser,
+      lastActive: Date.now(),
+    }));
+  } catch(e) {}
+};
+
+const loadSession = () => {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const { authUser, lastActive } = JSON.parse(raw);
+    if (!authUser) return null;
+    // Expire if inactive > 10 min
+    if (Date.now() - lastActive > INACTIVITY_MS) {
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return authUser;
+  } catch(e) { return null; }
+};
+
+const clearSession = () => { try { sessionStorage.removeItem(SESSION_KEY); } catch(e) {} };
+
 // ─── AUTH GATE ────────────────────────────────────────────────────────────────
 function AuthGate() {
   const [users,    setUsers]    = useState(() => lsLoad(LS_KEYS.users, INITIAL_USERS_DEFAULT));
-  const [authUser, setAuthUser] = useState(null);
-  const [screen,   setScreen]   = useState("login");
+  const savedSession             = loadSession();
+  const [authUser, setAuthUser] = useState(savedSession);
+  const [screen,   setScreen]   = useState(savedSession ? "app" : "login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState("");
@@ -411,6 +442,30 @@ function AuthGate() {
   // Persist users (Firebase + localStorage cache)
   useEffect(() => { saveUsers(users); }, [users]);
 
+  // ── Inactivity timer — resets on any user interaction ──
+  useEffect(() => {
+    if (screen !== "app") return;
+    let timer;
+    const resetTimer = () => {
+      clearTimeout(timer);
+      // Refresh lastActive in session
+      if (authUser) saveSession(authUser);
+      timer = setTimeout(() => {
+        clearSession();
+        setAuthUser(null);
+        setScreen("login");
+        setUsername(""); setPassword(""); setError("");
+      }, INACTIVITY_MS);
+    };
+    const events = ["mousemove","keydown","mousedown","touchstart","scroll","click"];
+    events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }));
+    resetTimer(); // start the timer immediately
+    return () => {
+      clearTimeout(timer);
+      events.forEach(e => window.removeEventListener(e, resetTimer));
+    };
+  }, [screen, authUser]);
+
   const login = () => {
     setError("");
     if (!username.trim() || !password.trim()) { setError("Enter username and password."); return; }
@@ -418,7 +473,9 @@ function AuthGate() {
     setTimeout(() => {
       const user = users.find(u => u.username.toLowerCase() === username.trim().toLowerCase() && u.password === password.trim());
       if (user) {
-        setAuthUser({ id:user.id, username:user.username, role:user.role, name:user.name });
+        const au = { id:user.id, username:user.username, role:user.role, name:user.name };
+        setAuthUser(au);
+        saveSession(au);
         setScreen("app");
       } else {
         setError("Incorrect username or password.");
@@ -429,11 +486,14 @@ function AuthGate() {
   };
 
   const enterAsViewer = () => {
-    setAuthUser({ id:"viewer", username:"guest", role:"viewer", name:"Guest Viewer" });
+    const au = { id:"viewer", username:"guest", role:"viewer", name:"Guest Viewer" };
+    setAuthUser(au);
+    saveSession(au);
     setScreen("app");
   };
 
   const logout = () => {
+    clearSession();
     setAuthUser(null);
     setScreen("login");
     setUsername(""); setPassword(""); setError("");
@@ -852,8 +912,8 @@ const ALL_DEPTS_LIST = [
   "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
   "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
-  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
-  "Cash Logistics","Finance Operations","Cash Management","Maintenance",
+  "Accounting and Finance (INC)","Accounting and Finance (SOL)",
+  "Accounting and Finance (EMSI)","Cash Logistics","Finance Operations","Cash Management","Maintenance",
   "Financial Data Management Support","Collection","Reconciliation",
 ];
 
@@ -897,6 +957,39 @@ const mkInitSchedule = (year) => ({
   },
 });
 
+// ─── FIREBASE: Remove stale/wrong department keys from qStatus ───────────────
+// Runs once on load — deletes any department name not in the official list
+const OFFICIAL_DEPTS = new Set([
+  "Legal","Internal Audit",
+  "Marketing","PMO","Business Development","Strategy Planning and Execution",
+  "Safety and Security","Supply Chain","Human Capital","Admin","Engineering",
+  "Security Systems and Technical Support","Site Reliability Engineer","Software Development",
+  "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
+  "Accounting and Finance (INC)","Accounting and Finance (SOL)","Accounting and Finance (EMSI)",
+  "Cash Logistics","Finance Operations","Cash Management","Maintenance",
+  "Financial Data Management Support","Collection","Reconciliation",
+]);
+
+const cleanStaleQStatus = (qStatus) => {
+  const cleaned = {};
+  Object.entries(qStatus).forEach(([dept, data]) => {
+    if (OFFICIAL_DEPTS.has(dept)) cleaned[dept] = data;
+    else console.log("🧹 Removed stale dept from qStatus:", dept);
+  });
+  return cleaned;
+};
+
+const cleanYearStore = (yearStore) => {
+  const cleaned = {};
+  Object.entries(yearStore).forEach(([year, ydata]) => {
+    cleaned[year] = {
+      ...ydata,
+      qStatus: ydata.qStatus ? cleanStaleQStatus(ydata.qStatus) : {},
+    };
+  });
+  return cleaned;
+};
+
 // ─── EMPTY year data (NO hardcoded KRs) ──────────────────────────────────────
 const mkEmptyYearData = (year) => ({
   rows: [],
@@ -910,12 +1003,13 @@ const initYearsFromStorage = () => lsLoad(LS_KEYS.years, [CURRENT_YEAR]);
 const initYearStoreFromStorage = () => {
   const saved = lsLoad(LS_KEYS.yearStore, null);
   if (saved) {
-    // Re-compute rows in case compute logic changed
+    // Re-compute rows and clean stale departments
     const rehydrated = {};
     Object.entries(saved).forEach(([year, ydata]) => {
       rehydrated[year] = {
         ...ydata,
         rows: (ydata.rows || []).map(r => compute(r)),
+        qStatus: ydata.qStatus ? cleanStaleQStatus(ydata.qStatus) : {},
       };
     });
     return rehydrated;
@@ -998,8 +1092,9 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         if (result.users)     { onUsersChange(result.users); lsSave(LS_KEYS.users, result.users); }
         if (result.years)     { setYears(result.years); lsSave(LS_KEYS.years, result.years); }
         if (result.yearStore) {
-          setYearStore(result.yearStore);
-          lsSave(LS_KEYS.yearStore, result.yearStore);
+          const cleanedStore = cleanYearStore(result.yearStore);
+          setYearStore(cleanedStore);
+          lsSave(LS_KEYS.yearStore, cleanedStore);
           // Switch to latest year
           const latestYear = Math.max(...result.years);
           setActiveYear(latestYear);
