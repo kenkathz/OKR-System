@@ -894,6 +894,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const [editIssue,   setEditIssue]   = useState(null);
   const [histDept,    setHistDept]    = useState(null);
   const [showYearMenu,setShowYearMenu] = useState(false);
+  const yearMenuRef = useRef(null);
 
   const toast$ = (msg,type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),4000); };
 
@@ -905,17 +906,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setDetailRow(null); setQEditCell(null); setEditSched(null);
     setYearStore(s => s[y] ? s : {...s, [y]: mkEmptyYearData(y)});
   };
-  const canAddYear = () => {
-    const now = new Date();
-    const month = now.getMonth();
-    return month >= 9;
-  };
-
   const addYear = () => {
-    if (!canAddYear()) {
-      toast$("New year can only be added during Q4 (October–December).","warn");
-      return;
-    }
     const maxYear = Math.max(...years);
     const newYear = maxYear + 1;
     setYears(prev => [...prev, newYear].sort((a,b)=>a-b));
@@ -1381,9 +1372,9 @@ ${issuesHTML}
   useEffect(()=>{if(view==="dashboard")loadAI();},[view]);
   useEffect(()=>{
     if(!showYearMenu) return;
-    const close = ()=>setShowYearMenu(false);
-    document.addEventListener("click", close);
-    return ()=>document.removeEventListener("click", close);
+    const close = (e)=>{ if(yearMenuRef.current && !yearMenuRef.current.contains(e.target)) setShowYearMenu(false); };
+    document.addEventListener("mousedown", close);
+    return ()=>document.removeEventListener("mousedown", close);
   },[showYearMenu]);
 
   const updateQStatus  = (dept,q,val) => { setQStatus(p=>({...p,[dept]:{...p[dept],[q]:val}})); setQEditCell(null); toast$(`${dept} — ${q} updated.`); };
@@ -1489,38 +1480,65 @@ ${issuesHTML}
             </div>
           </div>
           <div className="nav-actions" style={{display:"flex",gap:4,alignItems:"center",overflowX:"auto",flexShrink:1,minWidth:0}}>
-            <div style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>setShowYearMenu(p=>!p)} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:9,border:`1px solid ${C.gold}66`,background:`${C.gold}18`,color:C.gold,cursor:"pointer",fontWeight:800,fontSize:12,whiteSpace:"nowrap"}}>
+            <div ref={yearMenuRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>setShowYearMenu(p=>!p)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:9,border:`1px solid ${C.gold}88`,background:showYearMenu?`${C.gold}28`:`${C.gold}18`,color:C.gold,cursor:"pointer",fontWeight:800,fontSize:13,whiteSpace:"nowrap",transition:"background .15s"}}>
                 <span>FY {activeYear}</span>
-                <span style={{fontSize:9,opacity:.7}}>{showYearMenu?"▲":"▼"}</span>
+                <span style={{fontSize:10,marginLeft:2}}>{showYearMenu?"▲":"▼"}</span>
               </button>
               {showYearMenu&&(
-                <div onClick={e=>e.stopPropagation()} className="year-dropdown" style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,minWidth:200,boxShadow:"0 8px 32px rgba(0,0,0,.4)",zIndex:200,overflow:"hidden",animation:"fadeUp .15s ease"}}>
-                  <div style={{padding:"8px 12px",borderBottom:`1px solid ${C.border}`,fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700}}>Fiscal Years</div>
+                <div style={{
+                  position:"fixed",
+                  top:(()=>{const el=yearMenuRef.current;if(!el)return 60;const r=el.getBoundingClientRect();return r.bottom+6;})(),
+                  left:(()=>{const el=yearMenuRef.current;if(!el)return 16;const r=el.getBoundingClientRect();return r.left;})(),
+                  background:"#1a1f35",
+                  border:`1px solid ${C.gold}55`,
+                  borderRadius:14,
+                  minWidth:230,
+                  boxShadow:"0 16px 48px rgba(0,0,0,.7)",
+                  zIndex:99999,
+                  overflow:"visible",
+                  animation:"fadeUp .12s ease"
+                }}>
+                  <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`,fontSize:10,color:C.gold,textTransform:"uppercase",letterSpacing:2,fontWeight:700}}>Fiscal Years</div>
                   {[...years].sort((a,b)=>b-a).map(y=>{
-                    const yData=yearStore[y], hasData=((yData||{}).rows||[]).length>0||((yData||{}).issues||[]).length>0;
-                    const isCurrent=y===activeYear, isLatest=y===Math.max(...years);
+                    const yData=yearStore[y];
+                    const hasData=((yData||{}).rows||[]).length>0||((yData||{}).issues||[]).length>0;
+                    const isCurrent=y===activeYear;
+                    const isLatest=y===Math.max(...years);
                     return (
-                      <div key={y} style={{display:"flex",alignItems:"center",gap:6,padding:"9px 12px",background:isCurrent?`${C.gold}12`:"transparent",borderBottom:`1px solid ${C.border}22`}}>
-                        <button onClick={()=>{switchYear(y);setShowYearMenu(false);}} style={{flex:1,background:"none",border:"none",color:isCurrent?C.gold:C.text,cursor:"pointer",fontWeight:isCurrent?800:600,fontSize:13,textAlign:"left",display:"flex",alignItems:"center",gap:8}}>
+                      <div key={y} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:isCurrent?`${C.gold}14`:"transparent",borderBottom:`1px solid ${C.border}33`,transition:"background .1s"}}>
+                        <button
+                          onClick={()=>{switchYear(y);setShowYearMenu(false);}}
+                          style={{flex:1,background:"none",border:"none",color:isCurrent?C.gold:"#e8eaf2",cursor:"pointer",fontWeight:isCurrent?800:600,fontSize:14,textAlign:"left",display:"flex",alignItems:"center",gap:8,padding:0}}
+                        >
+                          <span style={{fontSize:16}}>{isCurrent?"◉":"○"}</span>
                           <span>FY {y}</span>
-                          {isLatest&&!isCurrent&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:99,background:`${C.green}18`,color:C.green,fontWeight:700}}>Latest</span>}
-                          {isCurrent&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:99,background:`${C.gold}22`,color:C.gold,fontWeight:700}}>Active</span>}
+                          {isCurrent&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:99,background:`${C.gold}22`,color:C.gold,fontWeight:700,border:`1px solid ${C.gold}44`}}>Active</span>}
+                          {isLatest&&!isCurrent&&<span style={{fontSize:9,padding:"2px 7px",borderRadius:99,background:`${C.green}18`,color:C.green,fontWeight:700,border:`1px solid ${C.green}44`}}>Latest</span>}
                         </button>
+                        {hasData&&<span style={{fontSize:10,color:C.muted,flexShrink:0,background:`${C.border}`,padding:"2px 7px",borderRadius:99}}>{((yData||{}).rows||[]).length} KRs</span>}
                         {!hasData&&years.length>1&&(
-                          <button onClick={()=>deleteYear(y)} style={{background:"none",border:`1px solid ${C.red}44`,color:C.red,cursor:"pointer",fontSize:10,padding:"2px 7px",borderRadius:6,fontWeight:700}} onMouseEnter={e=>{e.currentTarget.style.background=C.red;e.currentTarget.style.color="#fff";}} onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.red;}}>✕</button>
+                          <button
+                            onClick={()=>deleteYear(y)}
+                            title={`Delete FY ${y}`}
+                            style={{background:"none",border:`1px solid ${C.red}55`,color:C.red,cursor:"pointer",fontSize:11,padding:"3px 8px",borderRadius:6,fontWeight:700,flexShrink:0,transition:"all .15s"}}
+                            onMouseEnter={e=>{e.currentTarget.style.background=C.red;e.currentTarget.style.color="#fff";}}
+                            onMouseLeave={e=>{e.currentTarget.style.background="none";e.currentTarget.style.color=C.red;}}
+                          >✕ Delete</button>
                         )}
-                        {hasData&&<span style={{fontSize:10,color:C.muted,flexShrink:0}}>{((yData||{}).rows||[]).length} KRs</span>}
                       </div>
                     );
                   })}
-                  <div style={{padding:"8px 12px",borderTop:`1px solid ${C.border}`}}>
-                    {(()=>{
-                      const q4ok=canAddYear(), nextY=Math.max(...years)+1;
-                      return (<button onClick={addYear} disabled={!q4ok} style={{width:"100%",padding:"8px 12px",borderRadius:8,border:"none",background:q4ok?`linear-gradient(135deg,${C.accent},${C.purple})`:C.border,color:q4ok?"#fff":C.muted,cursor:q4ok?"pointer":"not-allowed",fontWeight:700,fontSize:12,textAlign:"center",opacity:q4ok?1:0.6}}>
-                        {q4ok?`+ Add FY ${nextY}`:`+ FY ${nextY} (Q4 only)`}
-                      </button>);
-                    })()}
+                  <div style={{padding:"10px 14px",borderTop:`1px solid ${C.border}`}}>
+                    <button
+                      onClick={addYear}
+                      style={{width:"100%",padding:"10px 14px",borderRadius:9,border:`1px solid ${C.accent}66`,background:`linear-gradient(135deg,${C.accent}22,${C.purple}22)`,color:"#e8eaf2",cursor:"pointer",fontWeight:700,fontSize:13,textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center",gap:8,transition:"all .15s"}}
+                      onMouseEnter={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent},${C.purple})`;e.currentTarget.style.color="#fff";}}
+                      onMouseLeave={e=>{e.currentTarget.style.background=`linear-gradient(135deg,${C.accent}22,${C.purple}22)`;e.currentTarget.style.color="#e8eaf2";}}
+                    >
+                      <span style={{fontSize:16,fontWeight:900}}>+</span>
+                      <span>Add FY {Math.max(...years)+1}</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -2173,7 +2191,7 @@ ${issuesHTML}
 }
 
 
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(AuthGate));
 
   </script>
