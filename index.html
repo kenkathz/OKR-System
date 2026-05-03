@@ -698,7 +698,7 @@ function getInsights(rows) {
     system:"You are an OKR strategist. Return ONLY valid JSON, no markdown.",
     messages:[{role:"user",content:"OKR data for Chiefs Group. Overall: "+ovPct+"%. Departments:\n"+summary+"\nReturn JSON: {\"insights\":[\"...\",\"...\",\"...\"],\"recommendations\":[\"...\",\"...\",\"...\"],\"risks\":[\"...\",\"...\",\"...\"],\"overallAssessment\":\"2 sentences\"}"}]
   });
-  return fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:body})
+return fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key": "YOUR_API_KEY_HERE","anthropic-version": "2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:body})
     .then(function(res){ return res.json(); })
     .then(function(d){
       if(d.error) throw new Error(d.error.message||"API error");
