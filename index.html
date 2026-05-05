@@ -221,11 +221,11 @@ const uid = () => ++_uid;
 //   exact+higher — 100% if Actual >= Target (meeting or exceeding is full score)
 //   exact+lower  — 100% if Actual <= Target (meeting or going below is full score)
 const compute = row => {
-  // Blank actual = not yet provided — excluded from scoring
   const actualRaw = row.actual;
   const hasActual = actualRaw !== "" && actualRaw !== null && actualRaw !== undefined;
+  // Blank actual = not yet provided → 0% done, actual stays blank, counts as 0 in scoring
   if (!hasActual) {
-    return { ...row, actual: "", pct: null, scoreEquivalent: 0 };
+    return { ...row, actual: "", pct: 0, scoreEquivalent: 0 };
   }
   const t = Number(row.target), a = Number(actualRaw);
   const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
@@ -888,7 +888,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               {[
                 ["Target", Number(row.target).toLocaleString(), C.muted],
                 ["Actual", row.actual===""||row.actual===null||row.actual===undefined ? "—" : Number(row.actual).toLocaleString(), row.actual===""||row.actual===null||row.actual===undefined ? C.muted : C.text],
-                ["% Done", row.pct===null ? "—" : `${row.pct}%`, row.pct===null ? C.muted : sc(row.pct)],
+                ["% Done", `${row.pct}%`, sc(row.pct)],
               ].map(([l,v,col])=>(
                 <div key={l} style={{background:C.surface,borderRadius:9,padding:"10px 12px"}}>
                   <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.2,marginBottom:4}}>{l}</div>
@@ -896,9 +896,9 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
                 </div>
               ))}
             </div>
-            {row.pct !== null ? <Bar pct={row.pct} color={sc(row.pct)} h={8}/> : <div style={{height:8,background:C.border,borderRadius:99,overflow:"hidden"}}><div style={{width:"0%",height:"100%"}}/></div>}
+            <Bar pct={row.pct} color={sc(row.pct)} h={8}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}}>
-              {row.pct !== null ? <Badge score={row.pct}/> : <span style={{fontSize:11,padding:"3px 10px",borderRadius:99,background:`${C.muted}18`,color:C.muted,fontWeight:700,border:`1px solid ${C.muted}33`}}>— No Data</span>}
+              <Badge score={row.pct}/>
               {row.targetDate&&<span style={{fontSize:11,color:C.muted}}>📅 {row.targetDate}</span>}
             </div>
             <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
@@ -1014,8 +1014,8 @@ const AddKRModal = ({onClose, onSave}) => {
 // ─── AI INSIGHTS ──────────────────────────────────────────────────────────────
 function getInsights(rows) {
   const deptMap = {};
-  rows.forEach(r => { const d=r.department; if(!deptMap[d]) deptMap[d]={chief:r.chiefGroup||getChief(r.department),krs:[],w:0,s:0}; deptMap[d].krs.push(r); if(r.pct!==null){deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent;} });
-  const totW=rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0), totS=rows.reduce((s,r)=>s+r.scoreEquivalent,0);
+  rows.forEach(r => { const d=r.department; if(!deptMap[d]) deptMap[d]={chief:r.chiefGroup||getChief(r.department),krs:[],w:0,s:0}; deptMap[d].krs.push(r); deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
+  const totW=rows.reduce((s,r)=>s+r.weight,0), totS=rows.reduce((s,r)=>s+r.scoreEquivalent,0);
   const ovPct=totW>0?((totS/totW)*100).toFixed(1):"0.0";
   const summary=Object.entries(deptMap).map(([name,d])=>{
     const pct=d.w>0?((d.s/d.w)*100).toFixed(1):"0.0";
@@ -1026,10 +1026,13 @@ function getInsights(rows) {
     system:"You are an OKR strategist. Return ONLY valid JSON, no markdown.",
     messages:[{role:"user",content:"OKR data for Chiefs Group. Overall: "+ovPct+"%. Departments:\n"+summary+"\nReturn JSON: {\"insights\":[\"...\",\"...\",\"...\"],\"recommendations\":[\"...\",\"...\",\"...\"],\"risks\":[\"...\",\"...\",\"...\"],\"overallAssessment\":\"2 sentences\"}"}]
   });
+  const apiKey = localStorage.getItem("okr_anthropic_key") || "";
+  if (!apiKey) throw new Error("NO_API_KEY");
   return fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{
       "Content-Type":"application/json",
+      "x-api-key": apiKey,
       "anthropic-version":"2023-06-01",
       "anthropic-dangerous-direct-browser-access":"true"
     },
@@ -1459,13 +1462,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const historyData = useMemo(() => years.map(y => {
     const yRows = (yearStore[y]||{}).rows || [];
-    const totW = yRows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
+    const totW = yRows.reduce((s,r)=>s+r.weight,0);
     const totS = yRows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const pct  = totW > 0 ? (totS/totW)*100 : 0;
     const deptMap = {};
-    yRows.forEach(r=>{ const d=r.department; if(!deptMap[d])deptMap[d]={w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; if(r.pct!==null){deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent;} });
+    yRows.forEach(r=>{ const d=r.department; if(!deptMap[d])deptMap[d]={w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
     const depts = Object.entries(deptMap).map(([name,d])=>({name,chief:d.chief,pct:d.w>0?(d.s/d.w)*100:0})).sort((a,b)=>b.pct-a.pct);
-    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>r.pct!==null&&r.pct>=80).length, atRisk:yRows.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80).length, offTrack:yRows.filter(r=>r.pct!==null&&r.pct<60).length };
+    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>r.pct>=80).length, atRisk:yRows.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:yRows.filter(r=>r.pct<60).length };
   }), [yearStore, years]);
 
   const allDepts = useMemo(()=>[...new Set(rows.map(r=>r.department))].sort(),[rows]);
@@ -1473,18 +1476,18 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const deptStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); if(r.pct!==null){map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent;} });
-    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct!==null&&k.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent; });
+    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   const chiefStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); if(r.pct!==null){map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent;} });
-    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct!==null&&k.pct<60).length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
+    rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent; });
+    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   // Only scored rows (with actual provided) count toward totals
-  const totW=useMemo(()=>rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0),[rows]);
+  const totW=useMemo(()=>rows.reduce((s,r)=>s+r.weight,0),[rows]);
   const totS=useMemo(()=>rows.reduce((s,r)=>s+r.scoreEquivalent,0),[rows]);
   const ovPct=totW>0?(totS/totW)*100:0;
 
@@ -1493,13 +1496,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setRankPage(1);
     let base = rows;
     if(filterType!=="ALL"){ if(CHIEF_NAMES.includes(filterType)){ if(selDept) base=rows.filter(r=>r.department===selDept); else base=rows.filter(r=>(r.chiefGroup||getChief(r.department))===filterType); } }
-    if(statusFilter==="on-track") base=base.filter(r=>r.pct!==null&&r.pct>=80);
-    else if(statusFilter==="at-risk") base=base.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80);
-    else if(statusFilter==="off-track") base=base.filter(r=>r.pct!==null&&r.pct<60);
+    if(statusFilter==="on-track") base=base.filter(r=>r.pct>=80);
+    else if(statusFilter==="at-risk") base=base.filter(r=>r.pct>=60&&r.pct<80);
+    else if(statusFilter==="off-track") base=base.filter(r=>r.pct<60);
     return base;
   },[rows,filterType,selDept,statusFilter]);
 
-  const visW=visibleRows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
+  const visW=visibleRows.reduce((s,r)=>s+r.weight,0);
   const visS=visibleRows.reduce((s,r)=>s+r.scoreEquivalent,0);
   const visPct=visW>0?(visS/visW)*100:0;
 
@@ -1563,7 +1566,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     const slbl = p => p>=80?"On Track":p>=60?"At Risk":"Off Track";
     const sbg  = p => p>=80?"#f0fdf4":p>=60?"#fffbeb":"#fef2f2";
     const esc  = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    const totW2 = rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
+    const totW2 = rows.reduce((s,r)=>s+r.weight,0);
     const totS2 = rows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const ovPct2 = totW2>0?(totS2/totW2)*100:0;
     const deptMap2 = {};
@@ -2243,7 +2246,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <div><div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5}}>{filterType==="ALL"?"Overall":selDept?selDept:filterType}</div><div style={{fontSize:26,fontWeight:800,fontFamily:"'Bebas Neue'",color:visibleRows.length?sc(visPct):C.muted,letterSpacing:1}}>{visibleRows.length?visPct.toFixed(1)+"%":"—"}</div></div>
                 <div style={{flex:1,minWidth:100}}><Bar pct={visPct} color={sc(visPct)} h={10}/></div>
                 <div style={{display:"flex",gap:14}}>
-                  {[["✓",visibleRows.filter(r=>r.pct!==null&&r.pct>=80).length,C.green],["⚠",visibleRows.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80).length,C.amber],["✕",visibleRows.filter(r=>r.pct!==null&&r.pct<60).length,C.red]].map(([ic,n,col])=>(
+                  {[["✓",visibleRows.filter(r=>r.pct>=80).length,C.green],["⚠",visibleRows.filter(r=>r.pct>=60&&r.pct<80).length,C.amber],["✕",visibleRows.filter(r=>r.pct<60).length,C.red]].map(([ic,n,col])=>(
                     <div key={ic} style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue'"}}>{n}</div><div style={{fontSize:10,color:C.muted}}>{ic}</div></div>
                   ))}
                 </div>
@@ -2311,8 +2314,8 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"—":Number(row.actual).toLocaleString()}</span></td>
                                 <td style={{padding:"0 6px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
-                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:row.pct===null?C.muted:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct===null?"—":`${row.pct}%`}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{row.pct===null?<span style={{fontSize:10,padding:"2px 9px",borderRadius:99,background:`${C.muted}18`,color:C.muted,fontWeight:700,border:`1px solid ${C.muted}33`,whiteSpace:"nowrap"}}>— No Data</span>:<Badge score={row.pct} small/>}</td>
+                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span></td>
+                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><Badge score={row.pct} small/></td>
                               </tr>
                             );
                           })}
