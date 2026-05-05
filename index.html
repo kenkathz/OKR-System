@@ -223,23 +223,29 @@ const uid = () => ++_uid;
 const compute = row => {
   const actualRaw = row.actual;
   const hasActual = actualRaw !== "" && actualRaw !== null && actualRaw !== undefined;
-  // Blank actual = not yet provided → 0% done, actual stays blank, counts as 0 in scoring
+  // Blank actual = not yet provided → always 0%, actual stays blank
   if (!hasActual) {
     return { ...row, actual: "", pct: 0, scoreEquivalent: 0 };
   }
   const t = Number(row.target), a = Number(actualRaw);
+  // Target=0: only score 100% if actual is explicitly 0 (exact match achieved)
+  if (t === 0) {
+    const pct = a === 0 ? 100 : 0;
+    return { ...row, pct, scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
+  }
   const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
   let pct;
   if (ft === "exact+higher" || ft === "higher+exact") {
-    pct = t === 0 ? (a >= 0 ? 100 : 0) : a >= t ? 100 : Math.max((a / t) * 100, 0);
+    pct = a >= t ? 100 : Math.max((a / t) * 100, 0);
   } else if (ft === "exact+lower" || ft === "lower+exact") {
-    pct = t === 0 ? (a === 0 ? 100 : 0) : a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
+    pct = a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
   } else if (ft === "exact") {
-    pct = t === 0 ? (a === 0 ? 100 : 0) : a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
+    pct = a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
   } else if (ft === "lower") {
-    pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((t / (a || 0.0001)) * 100, 100);
+    pct = Math.min((t / (a || 0.0001)) * 100, 100);
   } else {
-    pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((a / t) * 100, 100);
+    // higher (default)
+    pct = Math.min((a / t) * 100, 100);
   }
   pct = Math.max(0, Math.min(100, pct));
   return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
@@ -887,7 +893,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
               {[
                 ["Target", Number(row.target).toLocaleString(), C.muted],
-                ["Actual", row.actual===""||row.actual===null||row.actual===undefined ? "—" : Number(row.actual).toLocaleString(), row.actual===""||row.actual===null||row.actual===undefined ? C.muted : C.text],
+                ["Actual", row.actual===""||row.actual===null||row.actual===undefined ? "" : Number(row.actual).toLocaleString(), row.actual===""||row.actual===null||row.actual===undefined ? C.muted : C.text],
                 ["% Done", `${row.pct}%`, sc(row.pct)],
               ].map(([l,v,col])=>(
                 <div key={l} style={{background:C.surface,borderRadius:9,padding:"10px 12px"}}>
@@ -1027,7 +1033,7 @@ function getInsights(rows) {
     messages:[{role:"user",content:"OKR data for Chiefs Group. Overall: "+ovPct+"%. Departments:\n"+summary+"\nReturn JSON: {\"insights\":[\"...\",\"...\",\"...\"],\"recommendations\":[\"...\",\"...\",\"...\"],\"risks\":[\"...\",\"...\",\"...\"],\"overallAssessment\":\"2 sentences\"}"}]
   });
   const apiKey = localStorage.getItem("okr_anthropic_key") || "";
-  if (!apiKey) throw new Error("NO_API_KEY");
+  if (!apiKey) return Promise.reject(new Error("NO_API_KEY"));
   return fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{
@@ -1312,6 +1318,103 @@ function PDFExportModal({ onClose, onExport, activeYear, rows, issues }) {
   );
 }
 
+// ─── AI INSIGHTS CARD ─────────────────────────────────────────────────────────
+function AIInsightsCard({ rows, allDepts, insights, setInsights, loadingAI, loadAI }) {
+  const [apiKey,    setApiKeyState] = useState(()=>localStorage.getItem("okr_anthropic_key")||"");
+  const [keyInput,  setKeyInput]    = useState("");
+  const [showSetup, setShowSetup]   = useState(false);
+  const [keyVis,    setKeyVis]      = useState(false);
+  const hasKey = !!apiKey;
+  const noKeyError = insights && insights.error === "NO_API_KEY";
+
+  const saveKey = () => {
+    const k = keyInput.trim();
+    if (!k) return;
+    localStorage.setItem("okr_anthropic_key", k);
+    setApiKeyState(k); setKeyInput(""); setShowSetup(false);
+    setTimeout(loadAI, 100);
+  };
+  const clearKey = () => {
+    localStorage.removeItem("okr_anthropic_key");
+    setApiKeyState(""); setInsights(null); setShowSetup(false);
+  };
+
+  return (
+    <div style={{background:C.card,border:`1px solid ${C.purple}33`,borderRadius:18,padding:22}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:hasKey&&!noKeyError&&!showSetup?18:12,flexWrap:"wrap",gap:10}}>
+        <div>
+          <h2 style={{margin:0,fontSize:15,fontWeight:800}}>✦ AI Strategic Insights</h2>
+          <p style={{margin:"3px 0 0",fontSize:12,color:C.muted}}>Powered by Claude · {rows.length} KRs · {allDepts.length} departments</p>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {hasKey&&<button onClick={()=>setShowSetup(s=>!s)} style={{padding:"6px 10px",borderRadius:8,background:showSetup?`${C.purple}22`:"transparent",border:`1px solid ${C.purple}33`,color:C.purple,cursor:"pointer",fontSize:13}} title="API Key settings">🔑</button>}
+          <button onClick={loadAI} disabled={loadingAI||rows.length===0||!hasKey}
+            style={{padding:"8px 16px",borderRadius:9,background:`${C.purple}22`,border:`1px solid ${C.purple}55`,color:hasKey?C.purple:C.muted,cursor:hasKey&&!loadingAI?"pointer":"not-allowed",fontWeight:700,fontSize:12,opacity:hasKey?1:0.45}}>
+            {loadingAI?"⟳ Analyzing…":"↺ Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {/* API key setup panel */}
+      {(!hasKey||noKeyError||showSetup)&&(
+        <div style={{background:`${C.purple}0a`,border:`1px solid ${C.purple}33`,borderRadius:12,padding:16,marginBottom:16}}>
+          {(!hasKey||noKeyError)?(
+            <>
+              <div style={{fontSize:13,fontWeight:700,color:C.purple,marginBottom:6}}>🔑 Add your Anthropic API Key</div>
+              <div style={{fontSize:11,color:C.muted,marginBottom:12,lineHeight:1.7}}>
+                AI Insights uses Claude to analyze your OKR data. Your key is stored only in this browser and sent directly to Anthropic — never to any other server.<br/>
+                Get a key at <span style={{color:C.accent,fontWeight:600}}>console.anthropic.com</span>
+              </div>
+            </>
+          ):(
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+              <span style={{fontSize:12,fontWeight:700,color:C.green}}>✓ Key saved</span>
+              <span style={{fontSize:11,color:C.muted,fontFamily:"monospace",background:C.surface,padding:"2px 8px",borderRadius:6}}>sk-ant-•••{apiKey.slice(-6)}</span>
+              <button onClick={clearKey} style={{marginLeft:"auto",fontSize:11,color:C.red,background:"none",border:`1px solid ${C.red}44`,borderRadius:6,padding:"3px 8px",cursor:"pointer",fontWeight:600}}>Remove</button>
+            </div>
+          )}
+          <div style={{display:"flex",gap:8}}>
+            <div style={{flex:1,position:"relative"}}>
+              <input type={keyVis?"text":"password"} value={keyInput} onChange={e=>setKeyInput(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveKey()}
+                placeholder={hasKey?"Paste new key to replace…":"sk-ant-api03-…"}
+                style={{width:"100%",background:C.surface,border:`1px solid ${C.purple}55`,borderRadius:8,padding:"9px 36px 9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"}}
+                autoFocus={!hasKey}/>
+              <button onClick={()=>setKeyVis(v=>!v)} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,padding:0}}>{keyVis?"🙈":"👁"}</button>
+            </div>
+            <button onClick={saveKey} disabled={!keyInput.trim()}
+              style={{padding:"9px 16px",borderRadius:8,border:"none",background:keyInput.trim()?C.purple:C.border,color:keyInput.trim()?"#fff":C.muted,cursor:keyInput.trim()?"pointer":"not-allowed",fontWeight:700,fontSize:13,flexShrink:0}}>
+              Save & Run
+            </button>
+            {(hasKey&&!noKeyError)&&<button onClick={()=>setShowSetup(false)} style={{padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.muted,cursor:"pointer",fontSize:13}}>Cancel</button>}
+          </div>
+        </div>
+      )}
+
+      {loadingAI&&<div style={{display:"flex",gap:10,alignItems:"center",color:C.muted,padding:"16px 0"}}><div style={{width:16,height:16,border:`2px solid ${C.purple}44`,borderTopColor:C.purple,borderRadius:"50%",animation:"spin .8s linear infinite"}}/> Analyzing your OKR data…</div>}
+      {!loadingAI&&hasKey&&!insights&&rows.length>0&&!showSetup&&<div style={{color:C.muted,fontSize:13,padding:"8px 0"}}>Click <b style={{color:C.purple}}>↺ Refresh</b> to generate AI insights.</div>}
+
+      {insights&&!insights.error&&(
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div className="ins-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
+            {[["📊 Insights",insights.insights,C.accent],["🎯 Recommendations",insights.recommendations,C.green],["⚠ Risk Flags",insights.risks,C.red]].map(([title,items,col])=>(
+              <div key={title} style={{background:`${col}0a`,border:`1px solid ${col}22`,borderRadius:12,padding:16}}>
+                <div style={{fontSize:12,fontWeight:700,color:col,marginBottom:12}}>{title}</div>
+                {(items||[]).map((item,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,marginBottom:9,alignItems:"flex-start"}}><span style={{color:col,fontWeight:800,flexShrink:0,fontSize:12}}>{i+1}.</span><span style={{fontSize:12,color:C.text,lineHeight:1.5}}>{item}</span></div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {insights.overallAssessment&&<div style={{background:`${C.accent}08`,border:`1px solid ${C.accent}22`,borderRadius:10,padding:14}}><span style={{fontSize:11,color:C.accent,fontWeight:700,marginRight:8}}>EXEC SUMMARY</span><span style={{fontSize:12,color:C.text,lineHeight:1.6}}>{insights.overallAssessment}</span></div>}
+        </div>
+      )}
+      {insights&&insights.error&&insights.error!=="NO_API_KEY"&&<div style={{color:C.red,fontSize:13,background:`${C.red}12`,border:`1px solid ${C.red}33`,borderRadius:8,padding:"10px 14px"}}>{insights.error}</div>}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function App({ authUser, users, onUsersChange, onLogout }) {
   const isReadOnly = (authUser||{}).role === "viewer";
@@ -1491,9 +1594,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const totS=useMemo(()=>rows.reduce((s,r)=>s+r.scoreEquivalent,0),[rows]);
   const ovPct=totW>0?(totS/totW)*100:0;
 
+  // Reset to page 1 only when filters change, not when row data is updated
+  useEffect(()=>{ setTrackerPage(1); setRankPage(1); },[filterType,selDept,statusFilter]);
+
   const visibleRows=useMemo(()=>{
-    setTrackerPage(1);
-    setRankPage(1);
     let base = rows;
     if(filterType!=="ALL"){ if(CHIEF_NAMES.includes(filterType)){ if(selDept) base=rows.filter(r=>r.department===selDept); else base=rows.filter(r=>(r.chiefGroup||getChief(r.department))===filterType); } }
     if(statusFilter==="on-track") base=base.filter(r=>r.pct>=80);
@@ -1514,12 +1618,14 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   };
 
   const handleAdd = form => {
-    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual,formulaType:form.formulaType||"higher"});
+    const actualVal = String(form.actual).trim() === "" ? "" : +form.actual;
+    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher"});
     setRows(prev => { const next=[...prev,nr]; saveRows(next); return next; });
     setShowAdd(false); toast$("KR added ✓");
   };
   const handleUpdate = (form,editId) => {
-    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual,formulaType:form.formulaType||"higher"});
+    const actualVal = String(form.actual).trim() === "" ? "" : +form.actual;
+    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher"});
     setRows(prev => { const next=prev.map(r=>r.id===editId?nr:r); saveRows(next); return next; });
     setDetailRow(null); toast$("KR updated ✓");
   };
@@ -1553,10 +1659,12 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const loadAI=useCallback(()=>{
     if(!rows.length) return;
+    const apiKey = localStorage.getItem("okr_anthropic_key")||"";
+    if(!apiKey){ setInsights({error:"NO_API_KEY"}); return; }
     setLoadingAI(true); setInsights(null);
     getInsights(rows)
       .then(function(result){ setInsights(result); setLoadingAI(false); })
-      .catch(function(e){ setInsights({error:"Could not load AI insights. Add your API key or check the console. "+e.message}); setLoadingAI(false); });
+      .catch(function(e){ setInsights({error:e.message==="NO_API_KEY"?"NO_API_KEY":"Could not load AI insights. "+e.message}); setLoadingAI(false); });
   },[rows]);
 
   const [showPDFModal, setShowPDFModal] = useState(false);
@@ -1712,7 +1820,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
       <div class="section-title">⊞ KR Tracker List</div>
       <div class="section-sub">All ${rows.length} Key Results for FY ${activeYear} · sorted by Chief Group → Department → Score</div>
       <table><thead><tr><th>#</th><th>Chief</th><th>Department</th><th>Key Result</th><th>Target Date</th><th>Target</th><th>Actual</th><th>Formula</th><th>% Done</th><th>Status</th></tr></thead>
-      <tbody>${sortedRows.map((r,i)=>`<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:220px">${esc(r.keyResult)}</td><td style="white-space:nowrap;color:#64748b">${esc(r.targetDate||"—")}</td><td style="color:#64748b">${Number(r.target).toLocaleString()}</td><td style="font-weight:700">${Number(r.actual).toLocaleString()}</td><td style="color:#64748b;font-size:9.5px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.pct)};font-weight:800">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`).join("")}</tbody></table>
+      <tbody>${sortedRows.map((r,i)=>`<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:220px">${esc(r.keyResult)}</td><td style="white-space:nowrap;color:#64748b">${esc(r.targetDate||"—")}</td><td style="color:#64748b">${Number(r.target).toLocaleString()}</td><td style="font-weight:700">${r.actual===""||r.actual===null||r.actual===undefined?"":Number(r.actual).toLocaleString()}</td><td style="color:#64748b;font-size:9.5px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.pct)};font-weight:800">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`).join("")}</tbody></table>
     </div>`;
 
     // ── Section: Quarterly ──
@@ -1780,7 +1888,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     toast$("Report downloaded — open the file and click 'Print / Save as PDF'.");
   }, [rows, issues, qStatus, activeYear]);
 
-  useEffect(()=>{ if(view==="dashboard" && rows.length > 0) loadAI(); },[view]);
+  useEffect(()=>{ if(view==="dashboard" && rows.length > 0 && localStorage.getItem("okr_anthropic_key")) loadAI(); },[view]);
   useEffect(()=>{
     if(!showYearMenu) return;
     const close = (e)=>{ if(yearMenuRef.current && !yearMenuRef.current.contains(e.target)) setShowYearMenu(false); };
@@ -2149,33 +2257,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                   })()}
 
                   {/* AI Insights */}
-                  <div style={{background:C.card,border:`1px solid ${C.purple}33`,borderRadius:18,padding:22}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18,flexWrap:"wrap",gap:10}}>
-                      <div>
-                        <h2 style={{margin:0,fontSize:15,fontWeight:800}}>✦ AI Strategic Insights</h2>
-                        <p style={{margin:"3px 0 0",fontSize:12,color:C.muted}}>Powered by Claude · {rows.length} KRs · {allDepts.length} departments</p>
-                      </div>
-                      <button onClick={loadAI} disabled={loadingAI||rows.length===0} style={{padding:"8px 16px",borderRadius:9,background:`${C.purple}22`,border:`1px solid ${C.purple}55`,color:C.purple,cursor:"pointer",fontWeight:700,fontSize:12}}>{loadingAI?"⟳ Analyzing...":"↺ Refresh"}</button>
-                    </div>
-                    {loadingAI&&<div style={{display:"flex",gap:10,alignItems:"center",color:C.muted,padding:"16px 0"}}><div style={{width:16,height:16,border:`2px solid ${C.purple}44`,borderTopColor:C.purple,borderRadius:"50%",animation:"spin .8s linear infinite"}}/> Analyzing…</div>}
-                    {!loadingAI&&!insights&&rows.length>0&&<div style={{color:C.muted,fontSize:13,padding:"8px 0"}}>Click Refresh to generate AI insights for your current KR data.</div>}
-                    {insights&&!insights.error&&(
-                      <div style={{display:"flex",flexDirection:"column",gap:14}}>
-                        <div className="ins-grid" style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
-                          {[["📊 Insights",insights.insights,C.accent],["🎯 Recommendations",insights.recommendations,C.green],["⚠ Risk Flags",insights.risks,C.red]].map(([title,items,col])=>(
-                            <div key={title} style={{background:`${col}0a`,border:`1px solid ${col}22`,borderRadius:12,padding:16}}>
-                              <div style={{fontSize:12,fontWeight:700,color:col,marginBottom:12}}>{title}</div>
-                              {(items||[]).map((item,i)=>(
-                                <div key={i} style={{display:"flex",gap:8,marginBottom:9,alignItems:"flex-start"}}><span style={{color:col,fontWeight:800,flexShrink:0,fontSize:12}}>{i+1}.</span><span style={{fontSize:12,color:C.text,lineHeight:1.5}}>{item}</span></div>
-                              ))}
-                            </div>
-                          ))}
-                        </div>
-                        {insights.overallAssessment&&<div style={{background:`${C.accent}08`,border:`1px solid ${C.accent}22`,borderRadius:10,padding:14}}><span style={{fontSize:11,color:C.accent,fontWeight:700,marginRight:8}}>EXEC SUMMARY</span><span style={{fontSize:12,color:C.text,lineHeight:1.6}}>{insights.overallAssessment}</span></div>}
-                      </div>
-                    )}
-                    {insights&&insights.error&&<div style={{color:C.red,fontSize:13,background:`${C.red}12`,border:`1px solid ${C.red}33`,borderRadius:8,padding:"10px 14px"}}>{insights.error}</div>}
-                  </div>
+                  <AIInsightsCard rows={rows} allDepts={allDepts} insights={insights} setInsights={setInsights} loadingAI={loadingAI} loadAI={loadAI}/>
                 </>
               )}
             </div>
@@ -2312,7 +2394,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.keyResult}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{row.targetDate||"—"}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"—":Number(row.actual).toLocaleString()}</span></td>
+                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"":Number(row.actual).toLocaleString()}</span></td>
                                 <td style={{padding:"0 6px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
                                 <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><Badge score={row.pct} small/></td>
