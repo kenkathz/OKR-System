@@ -31,7 +31,9 @@
     let _firebaseReady = false;
 
     try {
-      if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY") {
+      if (typeof firebase === "undefined") {
+        console.warn("⚠️ Firebase SDK not available — using localStorage only.");
+      } else if (FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY") {
         firebase.initializeApp(FIREBASE_CONFIG);
         _db = firebase.database();
         _firebaseReady = true;
@@ -210,15 +212,64 @@ const si = s => s>=80?"✓":s>=60?"⚠":"✕";
 let _uid = Date.now();
 const uid = () => ++_uid;
 
+// formulaType can be a single value or a combo joined by "+" e.g. "exact+higher", "exact+lower"
+// Single modes:
+//   higher — more actual is better (revenue, rate): % = (Actual/Target)*100, capped 100
+//   lower  — less actual is better (errors, time):  % = (Target/Actual)*100, capped 100
+//   exact  — must equal target exactly:             100% if Actual === Target, 0% otherwise
+// Combo modes:
+//   exact+higher — 100% if Actual >= Target (meeting or exceeding is full score)
+//   exact+lower  — 100% if Actual <= Target (meeting or going below is full score)
 const compute = row => {
-  const t=Number(row.target), a=Number(row.actual);
-  const pct = t===0?(a===0?100:0):Math.min((a/t)*100,100);
+  const t = Number(row.target), a = Number(row.actual);
+  const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
+  let pct;
+  if (ft === "exact+higher" || ft === "higher+exact") {
+    // Full score when actual meets or exceeds target; scales down below
+    pct = t === 0 ? (a >= 0 ? 100 : 0) : a >= t ? 100 : Math.max((a / t) * 100, 0);
+  } else if (ft === "exact+lower" || ft === "lower+exact") {
+    // Full score when actual meets or goes below target; scales down above
+    pct = t === 0 ? (a === 0 ? 100 : 0) : a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
+  } else if (ft === "exact") {
+    // Strict exact: 100% only if identical, else proportional
+    pct = t === 0 ? (a === 0 ? 100 : 0) : a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
+  } else if (ft === "lower") {
+    pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((t / (a || 0.0001)) * 100, 100);
+  } else {
+    // higher (default)
+    pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((a / t) * 100, 100);
+  }
+  pct = Math.max(0, Math.min(100, pct));
   return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
 };
 
 const mkey = r => `${(r.department||"").trim().toLowerCase()}||${(r.keyResult||"").trim().toLowerCase()}`;
 
-const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual\r\nCSO,Business Development,Close 10 new enterprise accounts,Dec 31 2026,10,0\r\nCOO,Engineering,Reduce project delivery cycle by 20%,Dec 31 2026,20,0\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0\r\nCITO,Software Development,Achieve 99.5% system uptime,Dec 31 2026,99.5,0\r\nPresident,Legal,Complete all legal compliance reviews by Q3,Dec 31 2026,100,0`;
+const TMPL = `Chief Group,Department,Key Result,Target Date,Target,Actual,Formula Type\r\nCSO,Business Development,Close 10 new enterprise accounts,Dec 31 2026,10,0,higher\r\nCOO,Engineering,Reduce project delivery cycle by 20%,Dec 31 2026,20,0,lower\r\nCFO,Accounting and Finance (INC),Achieve 100% on-time financial reporting,Dec 31 2026,100,0,exact+higher\r\nCITO,Software Development,Achieve 99.5% system uptime,Dec 31 2026,99.5,0,exact+higher\r\nPresident,Legal,Complete all legal compliance reviews by Q3,Dec 31 2026,100,0,exact+lower`;
+
+// All selectable formula modes
+const FORMULA_TYPES = ["higher","lower","exact","exact+higher","exact+lower"];
+const FORMULA_LABELS = {
+  "higher":       "↑ Higher is Better",
+  "lower":        "↓ Lower is Better",
+  "exact":        "= Exact Only",
+  "exact+higher": "≥ Exact or Higher",
+  "exact+lower":  "≤ Exact or Lower",
+};
+const FORMULA_HINTS = {
+  "higher":       "% = (Actual ÷ Target) × 100",
+  "lower":        "% = (Target ÷ Actual) × 100",
+  "exact":        "100% only if Actual = Target exactly",
+  "exact+higher": "100% if Actual ≥ Target, scales below",
+  "exact+lower":  "100% if Actual ≤ Target, scales above",
+};
+const FORMULA_ICONS = {
+  "higher":       "↑",
+  "lower":        "↓",
+  "exact":        "=",
+  "exact+higher": "≥",
+  "exact+lower":  "≤",
+};
 
 // ─── CSV PARSING ──────────────────────────────────────────────────────────────
 function parseCSV(rawText) {
@@ -233,6 +284,7 @@ function parseCSV(rawText) {
     "chief group":"chiefgroup","chief":"chiefgroup","chiefgroup":"chiefgroup","group":"chiefgroup",
     "target date":"targetdate","date":"targetdate","due date":"targetdate",
     "initiative":"initiative","key metric":"keyresult",
+    "formula type":"formulatype","formula":"formulatype","type":"formulatype","direction":"formulatype","kr type":"formulatype",
   };
   const headerRowIdx = allRows.findIndex(r => r.some(c => c.trim() !== ""));
   if (headerRowIdx === -1) return { rows:[], errors:["No header row found."] };
@@ -257,7 +309,12 @@ function parseCSV(rawText) {
     const w = o.weight ? parseFloat(o.weight) : 100;
     const t = parseFloat(o.target), a = parseFloat(o.actual);
     if (isNaN(t) || isNaN(a)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Target/Actual must be numbers — skipped`); return; }
-    rows.push({ department: o.department, keyResult: o.keyresult, chiefGroup: o.chiefgroup || getChief(o.department), targetDate: o.targetdate || "", weight: isNaN(w)?100:w, target: t, actual: a });
+    // Normalize formula: accept "exact,higher" / "exact higher" / "exact+higher" → "exact+higher"
+    const rawFt = (o.formulatype || "").toLowerCase().trim().replace(/[,\s]+/g, "+");
+    // Also accept reversed combos
+    const normFt = rawFt === "higher+exact" ? "exact+higher" : rawFt === "lower+exact" ? "exact+lower" : rawFt;
+    const ft = FORMULA_TYPES.includes(normFt) ? normFt : "higher";
+    rows.push({ department: o.department, keyResult: o.keyresult, chiefGroup: o.chiefgroup || getChief(o.department), targetDate: o.targetdate || "", weight: isNaN(w)?100:w, target: t, actual: a, formulaType: ft });
   });
   return { rows, errors };
 }
@@ -553,16 +610,34 @@ function AuthGate() {
 
 // ─── TEMPLATE & IMPORT MODALS ─────────────────────────────────────────────────
 const TemplateModal = ({onClose}) => {
-  const [blobUrl, setBlobUrl] = useState("");
-  const [status, setStatus] = useState("idle");
-  useEffect(() => {
+  const [status, setStatus] = useState("ready");
+
+  const doDownload = () => {
     try {
-      const blob = new Blob([TMPL], { type:"text/csv;charset=utf-8;" });
+      // Try Blob + object URL first (works when hosted normally)
+      const blob = new Blob([TMPL], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
-      setBlobUrl(url); setStatus("ready");
-      return () => URL.revokeObjectURL(url);
-    } catch { setStatus("error"); }
-  }, []);
+      const a = document.createElement("a");
+      a.href = url; a.download = "OKR_Template.csv";
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus("downloading");
+    } catch(e) {
+      // Fallback: data URI (works in sandboxed / restricted environments)
+      try {
+        const encoded = "data:text/csv;charset=utf-8," + encodeURIComponent(TMPL);
+        const a = document.createElement("a");
+        a.href = encoded; a.download = "OKR_Template.csv";
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        setStatus("downloading");
+      } catch(e2) {
+        setStatus("error");
+      }
+    }
+  };
+
   return (
     <div style={{position:"fixed",inset:0,background:"#000d",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
       <div onClick={e=>e.stopPropagation()} style={{background:C.card,border:`1px solid ${C.gold}55`,borderRadius:20,width:"min(520px,96vw)",boxShadow:`0 0 60px ${C.gold}11`,overflow:"hidden"}}>
@@ -575,21 +650,28 @@ const TemplateModal = ({onClose}) => {
         </div>
         <div style={{padding:"24px"}}>
           <div style={{textAlign:"center",marginBottom:22}}>
-            {status==="ready"&&blobUrl ? (
-              <a href={blobUrl} download="OKR_Template.csv" onClick={()=>setStatus("downloading")}
-                style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:10,padding:"15px 32px",borderRadius:12,background:`linear-gradient(135deg,${C.green},${C.accent})`,color:"#fff",fontWeight:800,fontSize:16,textDecoration:"none",boxShadow:`0 4px 20px ${C.green}44`}}>
-                ⬇ Download OKR_Template.csv
-              </a>
-            ) : status==="downloading" ? (
+            {status==="downloading" ? (
               <div style={{padding:"15px 32px",borderRadius:12,background:`${C.green}18`,border:`1px solid ${C.green}44`,color:C.green,fontWeight:700,fontSize:15,display:"inline-block"}}>✓ Download started!</div>
+            ) : status==="error" ? (
+              <div style={{padding:"15px 32px",borderRadius:12,background:`${C.red}18`,border:`1px solid ${C.red}44`,color:C.red,fontWeight:700,fontSize:14,display:"inline-block"}}>⚠ Download blocked — copy the text below instead</div>
             ) : (
-              <div style={{padding:"15px 32px",borderRadius:12,background:C.border,color:C.muted,fontSize:14,display:"inline-block"}}>Preparing…</div>
+              <button onClick={doDownload}
+                style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:10,padding:"15px 32px",borderRadius:12,background:`linear-gradient(135deg,${C.green},${C.accent})`,color:"#fff",fontWeight:800,fontSize:16,border:"none",cursor:"pointer",boxShadow:`0 4px 20px ${C.green}44`}}>
+                ⬇ Download OKR_Template.csv
+              </button>
             )}
+          </div>
+          {/* Copyable fallback — always visible so user can copy-paste into Excel if download is blocked */}
+          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:16}}>
+            <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:6}}>Or copy this CSV text directly</div>
+            <textarea readOnly value={TMPL} rows={7}
+              style={{width:"100%",background:"#0a0c14",border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 10px",color:C.muted,fontSize:10,fontFamily:"monospace",resize:"none",outline:"none",lineHeight:1.6,boxSizing:"border-box"}}
+              onClick={e=>e.target.select()}/>
           </div>
           <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px",marginBottom:16}}>
             <div style={{fontSize:11,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:10}}>Columns in the template</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {["Chief Group","Department","Key Result","Target Date","Target","Actual"].map((col,i)=>(
+              {["Chief Group","Department","Key Result","Target Date","Target","Actual","Formula Type"].map((col,i)=>(
                 <span key={col} style={{padding:"4px 10px",borderRadius:99,fontSize:11,fontWeight:600,background:i<2?`${C.accent}18`:i===2?`${C.green}18`:`${C.gold}18`,color:i<2?C.accent:i===2?C.green:C.gold,border:`1px solid ${i<2?C.accent:i===2?C.green:C.gold}33`}}>{col}</span>
               ))}
             </div>
@@ -753,7 +835,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
   const [form, setForm] = useState({
     chiefGroup: row.chiefGroup||"", department: row.department, _deptMode: "list",
     keyResult: row.keyResult, weight: row.weight, targetDate: row.targetDate||"",
-    target: row.target, actual: row.actual,
+    target: row.target, actual: row.actual, formulaType: row.formulaType||"higher",
   });
   const [confirmDel, setConfirmDel] = useState(false);
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
@@ -761,6 +843,9 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
   const ist = {width:"100%",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"};
   const lbl = t => <label style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>{t}</label>;
   const chiefCol = CHIEF_COLORS[row.chiefGroup||getChief(row.department)]||C.muted;
+  const ft = row.formulaType||"higher";
+  const FT_COL = { higher:C.green, lower:C.amber, exact:C.accent, "exact+higher":C.green, "exact+lower":C.amber };
+  const ftCol = FT_COL[ft] || C.accent;
 
   if (confirmDel) return (
     <div style={{position:"fixed",inset:0,background:"#000d",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -785,6 +870,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
             <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4,flexWrap:"wrap"}}>
               <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:`${chiefCol}18`,color:chiefCol,border:`1px solid ${chiefCol}33`,fontWeight:700}}>{row.chiefGroup||getChief(row.department)}</span>
               <span style={{fontSize:11,color:C.muted}}>{row.department}</span>
+              <span style={{fontSize:10,padding:"1px 7px",borderRadius:99,background:`${ftCol}18`,color:ftCol,border:`1px solid ${ftCol}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {FORMULA_LABELS[ft]||ft}</span>
             </div>
             <div style={{fontSize:14,fontWeight:700,color:C.text,lineHeight:1.4}}>{row.keyResult}</div>
           </div>
@@ -805,6 +891,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               <Badge score={row.pct}/>
               {row.targetDate&&<span style={{fontSize:11,color:C.muted}}>📅 {row.targetDate}</span>}
             </div>
+            <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
           </div>
         )}
         <div style={{padding:"16px 20px"}}>
@@ -827,9 +914,13 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               </div>
               <div style={{marginBottom:11}}>{lbl("Key Result")}<input value={form.keyResult} onChange={set("keyResult")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
               <div style={{marginBottom:11}}>{lbl("Target Date")}<input value={form.targetDate} onChange={set("targetDate")} placeholder="Dec 31 2026" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
                 <div>{lbl("Target")}<input type="number" value={form.target} onChange={set("target")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
                 <div>{lbl("Actual")}<input type="number" value={form.actual} onChange={set("actual")} style={{...ist,borderColor:C.green}} onFocus={e=>e.target.style.borderColor=C.green} onBlur={e=>e.target.style.borderColor=C.green}/></div>
+              </div>
+              <div style={{marginBottom:16}}>
+                {lbl("Formula Type — How is performance measured?")}
+                <FormulaSelector value={form.formulaType} onChange={ft=>setForm(p=>({...p,formulaType:ft}))} ist={ist}/>
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setEditing(false)} style={{flex:1,padding:10,borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.muted,cursor:"pointer",fontWeight:600}}>Cancel</button>
@@ -843,8 +934,38 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
   );
 };
 
+const FormulaSelector = ({value, onChange}) => {
+  const ftColors = { higher: C.green, lower: C.amber, exact: C.accent, "exact+higher": C.green, "exact+lower": C.amber };
+  const col = ftColors[value] || C.accent;
+  const rows = [
+    ["higher", "lower"],
+    ["exact", "exact+higher", "exact+lower"],
+  ];
+  return (
+    <div>
+      {rows.map((group, gi) => (
+        <div key={gi} style={{display:"grid",gridTemplateColumns:`repeat(${group.length},1fr)`,gap:6,marginBottom:6}}>
+          {group.map(ft => {
+            const sel = value === ft;
+            const ftCols = { higher:C.green, lower:C.amber, exact:C.accent, "exact+higher":C.green, "exact+lower":C.amber };
+            const fc = ftCols[ft] || C.accent;
+            return (
+              <div key={ft} onClick={()=>onChange(ft)}
+                style={{cursor:"pointer",borderRadius:9,border:`1px solid ${sel?fc:C.border}`,background:sel?`${fc}18`:"transparent",padding:"8px 10px",textAlign:"center",transition:"all .15s",userSelect:"none"}}>
+                <div style={{fontSize:18,fontWeight:800,color:sel?fc:C.muted,lineHeight:1}}>{FORMULA_ICONS[ft]}</div>
+                <div style={{fontSize:10,fontWeight:700,color:sel?fc:C.muted,marginTop:3,lineHeight:1.3}}>{FORMULA_LABELS[ft]}</div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      <div style={{fontSize:10,color:col,marginTop:4,padding:"4px 8px",background:`${col}0d`,borderRadius:6,fontFamily:"monospace"}}>{FORMULA_HINTS[value] || ""}</div>
+    </div>
+  );
+};
+
 const AddKRModal = ({onClose, onSave}) => {
-  const [form,setForm] = useState({chiefGroup:"",department:"",_deptMode:"list",keyResult:"",targetDate:"",target:"",actual:"",weight:100});
+  const [form,setForm] = useState({chiefGroup:"",department:"",_deptMode:"list",keyResult:"",targetDate:"",target:"",actual:"",weight:100,formulaType:"higher"});
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
   const valid = form.department&&form.keyResult&&form.target&&String(form.actual).trim()!=="";
   const ist = {width:"100%",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"};
@@ -863,9 +984,13 @@ const AddKRModal = ({onClose, onSave}) => {
         </div>
         <div style={{marginBottom:11}}>{lbl("Key Result *")}<input value={form.keyResult} onChange={set("keyResult")} placeholder="e.g. Achieve 95% collection rate" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
         <div style={{marginBottom:11}}>{lbl("Target Date")}<input value={form.targetDate} onChange={set("targetDate")} placeholder="Dec 31 2026" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
           <div>{lbl("Target *")}<input type="number" value={form.target} onChange={set("target")} placeholder="100" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
           <div>{lbl("Actual *")}<input type="number" value={form.actual} onChange={set("actual")} placeholder="0" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
+        </div>
+        <div style={{marginBottom:16}}>
+          {lbl("Formula Type — How is performance measured?")}
+          <FormulaSelector value={form.formulaType} onChange={ft=>setForm(p=>({...p,formulaType:ft}))} ist={ist}/>
         </div>
         <div style={{display:"flex",gap:10}}>
           <button onClick={onClose} style={{flex:1,padding:10,borderRadius:8,border:`1px solid ${C.border}`,background:"transparent",color:C.muted,cursor:"pointer",fontWeight:600}}>Cancel</button>
@@ -1297,12 +1422,12 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   };
 
   const handleAdd = form => {
-    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual});
+    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual,formulaType:form.formulaType||"higher"});
     setRows(prev => { const next=[...prev,nr]; saveRows(next); return next; });
     setShowAdd(false); toast$("KR added ✓");
   };
   const handleUpdate = (form,editId) => {
-    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual});
+    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual,formulaType:form.formulaType||"higher"});
     setRows(prev => { const next=prev.map(r=>r.id===editId?nr:r); saveRows(next); return next; });
     setDetailRow(null); toast$("KR updated ✓");
   };
@@ -1364,11 +1489,20 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     <div class="section"><h2 style="margin-bottom:14px">Chief Group Performance</h2><table><thead><tr><th>#</th><th>Chief Group</th><th>Depts</th><th>KRs</th><th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th></tr></thead><tbody>${chiefList2.map((c,i)=>`<tr><td>${i+1}</td><td><b>${esc(c.name)}</b></td><td>${c.depts}</td><td>${c.krs}</td><td style="color:#16a34a;font-weight:700">${c.onTrack}</td><td style="color:#d97706;font-weight:700">${c.atRisk}</td><td style="color:#dc2626;font-weight:700">${c.offTrack}</td><td>${bar(c.pct,100)}</td><td><span class="badge" style="background:${sbg(c.pct)};color:${sc2(c.pct)}">${slbl(c.pct)}</span></td></tr>`).join("")}</tbody></table>
     <h2 style="margin:20px 0 14px">All Key Results</h2><table><thead><tr><th>#</th><th>Chief</th><th>Department</th><th>Key Result</th><th>Target Date</th><th>Target</th><th>Actual</th><th>% Done</th><th>Status</th></tr></thead><tbody>${sortedRows.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.chiefGroup||getChief(r.department))}</td><td><b>${esc(r.department)}</b></td><td>${esc(r.keyResult)}</td><td>${esc(r.targetDate||"—")}</td><td>${Number(r.target).toLocaleString()}</td><td><b>${Number(r.actual).toLocaleString()}</b></td><td style="color:${sc2(r.pct)};font-weight:700">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`).join("")}</tbody></table></div></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `OKR_Report_FY${activeYear}_${new Date().toISOString().slice(0,10)}.html`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    const fname = `OKR_Report_FY${activeYear}_${new Date().toISOString().slice(0,10)}.html`;
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = fname;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch(e) {
+      // Fallback for sandboxed environments
+      const encoded = "data:text/html;charset=utf-8," + encodeURIComponent(html);
+      const a = document.createElement("a");
+      a.href = encoded; a.download = fname;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
     toast$("Report downloaded — open the file and click Print / Save as PDF.");
   }, [rows, issues, activeYear]);
 
@@ -1418,6 +1552,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         .kr-row{transition:background .12s;}
         .kr-row:hover{background:${C.accent}0a!important;cursor:pointer}
         .dsk{display:block}.mob{display:none}
+        .formula-badge{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}
         @media(max-width:700px){
           .dsk{display:none!important}.mob{display:flex!important}
           .hero-grid,.chief-grid,.dept-grid,.ins-grid{grid-template-columns:1fr!important}
@@ -1432,6 +1567,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
           .summary-bar{flex-wrap:wrap;gap:8px!important}
           .q-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
           .tracker-toolbar{flex-wrap:wrap;gap:6px!important}
+          .issues-stats{grid-template-columns:repeat(3,1fr)!important}
+        }
+        @media(max-width:480px){
+          .issues-stats{grid-template-columns:repeat(2,1fr)!important}
         }
       `}</style>
 
@@ -1875,14 +2014,14 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 return (
                   <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",width:"100%"}}>
                     <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
-                      <table style={{width:"100%",borderCollapse:"collapse",minWidth:680,tableLayout:"fixed"}}>
-                        <colgroup><col style={{width:40}}/><col style={{width:78}}/><col style={{width:138}}/><col/><col style={{width:88}}/><col style={{width:80}}/><col style={{width:70}}/><col style={{width:60}}/><col style={{width:98}}/></colgroup>
+                      <table style={{width:"100%",borderCollapse:"collapse",minWidth:780,tableLayout:"fixed"}}>
+                        <colgroup><col style={{width:36}}/><col style={{width:80}}/><col style={{width:130}}/><col/><col style={{width:90}}/><col style={{width:70}}/><col style={{width:65}}/><col style={{width:130}}/><col style={{width:68}}/><col style={{width:96}}/></colgroup>
                         <thead>
                           <tr style={{background:C.surface}}>
                             <th style={{padding:"9px 10px",textAlign:"left",fontSize:10,color:C.muted,borderBottom:`1px solid ${C.border}`,width:40}}>
                               <input type="checkbox" checked={selectedIds.size===visibleRows.length&&visibleRows.length>0} onChange={e=>{ if(e.target.checked) setSelectedIds(new Set(visibleRows.map(r=>r.id))); else setSelectedIds(new Set()); }} style={{cursor:"pointer",accentColor:C.accent}}/>
                             </th>
-                            {["Chief","Department","Key Result","Target Date","Target","Actual","% Done","Status"].map(h=>(
+                            {["Chief","Department","Key Result","Target Date","Target","Actual","Formula","% Done","Status"].map(h=>(
                               <th key={h} style={{padding:"9px 10px",textAlign:"left",fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.2,fontWeight:700,borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>
                             ))}
                           </tr>
@@ -1900,7 +2039,8 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{row.targetDate||"—"}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:C.text}}>{Number(row.actual).toLocaleString()}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct)}}>{row.pct}%</span></td>
+                                <td style={{padding:"0 6px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
+                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><Badge score={row.pct} small/></td>
                               </tr>
                             );
@@ -1909,7 +2049,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                         <tfoot>
                           <tr style={{background:`${C.accent}0a`,borderTop:`2px solid ${C.accent}33`}}>
                             <td/><td colSpan={3} style={{padding:"10px 10px",fontSize:11,fontWeight:800,color:C.accent,textTransform:"uppercase",letterSpacing:1.5}}>Total · {filterType==="ALL"?"All":selDept?selDept:filterType}</td>
-                            <td/><td/><td/>
+                            <td/><td/><td/><td/>
                             <td style={{padding:"10px 10px",fontSize:12,fontWeight:800,color:sc(visPct)}}>{visPct.toFixed(1)}%</td>
                             <td style={{padding:"10px 10px"}}><Badge score={visPct} small/></td>
                           </tr>
@@ -1998,7 +2138,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <p style={{fontSize:12,color:C.muted,marginTop:3}}>{issues.length} issue{issues.length!==1?"s":""} logged for FY {activeYear}</p>
               </div>
               {issues.length>0&&(
-                <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:14}}>
+                <div className="issues-stats" style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:14}}>
                   {ISSUE_STATUS_LIST.map(s=>{const n=issues.filter(i=>i.status===s).length,col=isColor(s);return(<div key={s} style={{background:C.card,border:`1px solid ${col}33`,borderRadius:10,padding:"12px 14px",textAlign:"center"}}><div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,marginBottom:4}}>{s}</div><div style={{fontSize:28,fontWeight:800,fontFamily:"'Bebas Neue',sans-serif",color:col}}>{n}</div></div>);})}
                 </div>
               )}
