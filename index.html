@@ -1112,90 +1112,66 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const [fbLoading, setFbLoading] = useState(USE_FB);
   const [fbStatus,  setFbStatus]  = useState(USE_FB ? "connecting" : "local");
 
-  // ── On mount: load latest data from Firebase (overrides localStorage cache) ──
+  // ── On mount: load latest data from Firebase ────────────────────────────────
   useEffect(() => {
-    if (!USE_FB) return;
+    if (!USE_FB) { setFbLoading(false); return; }
     loadAllFromFirebase().then(result => {
-      if (result) {
-        if (result.users)     { onUsersChange(result.users); lsSave(LS_KEYS.users, result.users); }
-        if (result.years)     { setYears(result.years); lsSave(LS_KEYS.years, result.years); }
-        if (result.yearStore) {
-          const cleanedStore = cleanYearStore(result.yearStore);
-          setYearStore(cleanedStore);
-          lsSave(LS_KEYS.yearStore, cleanedStore);
-          // Permanently delete stale dept keys directly from Firebase
-          // then overwrite each year doc with clean data
-          const staleNames = [
-            // Confirmed dirty from Firebase console
-            "Mainatenance",           // typo
-            "Governance and compliance", // wrong name
-            // Other known dirty entries
-            "Customer Helpdesk",
-            "Governance, Risk and Compliance Department",
-            "Supply Chain Management",
-            "Audit",
-            "SRE",
-            "Engineering Department",
-            "Human Capital Department",
-            "Administration Division",
-            "Supply Chain Management Division",
-            "Safety and Security Division",
-            "BusDev Department",
-            "Software Development Department",
-            "Strategic Planning and Execution",  // old name before rename
-            // Trailing space variants (caused by CSV imports)
-            "Accounting and Finance (EMSI) ",
-            "Supply Chain ",
-            "Finance Operations ",
-            "Reconciliation ",
-            "Maintenance ",
-            "Mainatenance ",
-            "Legal ",
-            "Marketing ",
-            "Admin ",
-            "Engineering ",
-            "PMO ",
-            "Collection ",
-          ];
-          Object.keys(result.yearStore).forEach(year => {
-            staleNames.forEach(bad => {
-              db.ref(DB_ROOT + "/year_" + year + "/qStatus/" + encodeURIComponent(bad)).remove()
-                .catch(() => {});
-              // Also try raw key (RTDB encodes / but not spaces)
-              db.ref(DB_ROOT + "/year_" + year + "/qStatus").child(bad).remove()
-                .catch(() => {});
-            });
-          });
-          // Hard-reset qStatus node for each year to completely replace with clean data
-          Object.entries(cleanedStore).forEach(([year, data]) => {
-            saveQStatusOnly(Number(year), data.qStatus || {});
-            saveYearData(Number(year), data);
-          });
-          // Switch to latest year
-          const latestYear = Math.max(...result.years);
-          setActiveYear(latestYear);
-        }
+      if (result && result.yearStore) {
+        // Update users if present
+        if (result.users) { onUsersChange(result.users); lsSave(LS_KEYS.users, result.users); }
+        // Update years list
+        if (result.years) { setYears(result.years); lsSave(LS_KEYS.years, result.years); }
+        // Clean and apply yearStore — this is the source of truth
+        const cleanedStore = cleanYearStore(result.yearStore);
+        // Update localStorage cache
+        lsSave(LS_KEYS.yearStore, cleanedStore);
+        // Hard-reset qStatus in Firebase to remove stale dept keys permanently
+        Object.entries(cleanedStore).forEach(([year, data]) => {
+          saveQStatusOnly(Number(year), data.qStatus || {});
+        });
+        // Apply to state AFTER all cleanup — this triggers re-render with clean data
+        setYearStore(cleanedStore);
+        // Switch to latest year
+        const latestYear = Math.max(...(result.years || [activeYear]));
+        setActiveYear(latestYear);
         setFbStatus("connected");
+        console.log("✅ Firebase loaded:", Object.entries(cleanedStore).map(([y,d])=>`FY${y}: ${(d.rows||[]).length} KRs`).join(", "));
       } else {
-        setFbStatus(USE_FB ? "connected_empty" : "local");
+        // Firebase is empty — this is a fresh setup, keep localStorage data
+        // and write it UP to Firebase so it gets saved
+        console.log("ℹ️ Firebase empty — pushing localStorage data to Firebase");
+        const localStore = initYearStoreFromStorage();
+        const localYears = initYearsFromStorage();
+        localYears.forEach(y => {
+          if (localStore[y] && (localStore[y].rows||[]).length > 0) {
+            saveYearData(y, localStore[y]);
+          }
+        });
+        saveYears(localYears);
+        setFbStatus("connected");
       }
+    }).catch(e => {
+      console.error("Firebase load error:", e);
+      setFbStatus("error");
+    }).finally(() => {
       setFbLoading(false);
-    }).catch(() => { setFbStatus("error"); setFbLoading(false); });
+    });
   }, []);
 
   // ── Persist years list on change ──
   useEffect(() => { saveYears(years); }, [years]);
 
-  // ── Persist individual year data whenever yearStore changes ──
-  const prevYearStore = useRef({});
+  // ── Persist year data — only fires after initial Firebase load completes ──
+  // fbLoading guard prevents overwriting Firebase with stale localStorage cache on mount
+  const isFirstMount = useRef(true);
   useEffect(() => {
-    Object.entries(yearStore).forEach(([year, data]) => {
-      const prev = prevYearStore.current[year];
-      if (JSON.stringify(prev) !== JSON.stringify(data)) {
-        saveYearData(Number(year), data);
-      }
-    });
-    prevYearStore.current = yearStore;
+    // Skip the very first render (that's the localStorage hydration, not a user change)
+    if (isFirstMount.current) { isFirstMount.current = false; return; }
+    // Skip while Firebase is still loading (avoid race condition)
+    if (fbLoading) return;
+    // Save current active year data to Firebase + localStorage
+    const data = yearStore[activeYear];
+    if (data) saveYearData(activeYear, data);
   }, [yearStore]);
 
   // ── Derived year data ──
@@ -1313,10 +1289,32 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const visS=visibleRows.reduce((s,r)=>s+r.scoreEquivalent,0);
   const visPct=visW>0?(visS/visW)*100:0;
 
-  const handleAdd = form => { const nr=compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual}); setRows(p=>[...p,nr]); setShowAdd(false); toast$("KR added."); };
-  const handleUpdate = (form,editId) => { const nr=compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual}); setRows(p=>p.map(r=>r.id===editId?nr:r)); setDetailRow(null); toast$("KR updated."); };
-  const handleDelete = id => { setRows(p=>p.filter(r=>r.id!==id)); setDetailRow(null); toast$("KR deleted.","warn"); };
-  const handleBulkDelete = () => { const n=selectedIds.size; setRows(p=>p.filter(r=>!selectedIds.has(r.id))); setSelectedIds(new Set()); toast$(`${n} KR${n!==1?"s":""} deleted.`,"warn"); };
+  // Save rows directly to Firebase immediately after each mutation
+  const saveRows = (newRows) => {
+    const current = yearStore[activeYear] || mkEmptyYearData(activeYear);
+    const data = { ...current, rows: newRows };
+    saveYearData(activeYear, data);
+  };
+
+  const handleAdd = form => {
+    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual});
+    setRows(prev => { const next=[...prev,nr]; saveRows(next); return next; });
+    setShowAdd(false); toast$("KR added ✓");
+  };
+  const handleUpdate = (form,editId) => {
+    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:+form.actual});
+    setRows(prev => { const next=prev.map(r=>r.id===editId?nr:r); saveRows(next); return next; });
+    setDetailRow(null); toast$("KR updated ✓");
+  };
+  const handleDelete = id => {
+    setRows(prev => { const next=prev.filter(r=>r.id!==id); saveRows(next); return next; });
+    setDetailRow(null); toast$("KR deleted.","warn");
+  };
+  const handleBulkDelete = () => {
+    const n=selectedIds.size;
+    setRows(prev => { const next=prev.filter(r=>!selectedIds.has(r.id)); saveRows(next); return next; });
+    setSelectedIds(new Set()); toast$(`${n} KR${n!==1?"s":""} deleted.`,"warn");
+  };
   const handleParsed = (parsedRows,errors) => { setShowImport(false); setPreviewData({rows:parsedRows,errors}); };
 
   const handleImportConfirm = () => {
@@ -1328,7 +1326,12 @@ function App({ authUser, users, onUsersChange, onLogout }) {
       if (existingId !== undefined) { const idx=next.findIndex(r=>r.id===existingId); if(idx>-1){next[idx]=compute({...next[idx],chiefGroup:imp.chiefGroup||next[idx].chiefGroup,targetDate:imp.targetDate||next[idx].targetDate,weight:imp.weight,target:imp.target,actual:imp.actual});upd++;} }
       else { next.push(compute({...imp,id:uid()})); add++; }
     });
-    setRows(next); setPreviewData(null); toast$(`Import complete — ${upd} updated, ${add} added. Total: ${next.length} KRs.`);
+    setRows(next);
+    // Explicitly save to Firebase immediately after import
+    const current = yearStore[activeYear] || mkEmptyYearData(activeYear);
+    saveYearData(activeYear, { ...current, rows: next });
+    setPreviewData(null);
+    toast$(`Import complete — ${upd} updated, ${add} added. Total: ${next.length} KRs. Saved to Firebase ✓`);
   };
 
   const loadAI=useCallback(()=>{
