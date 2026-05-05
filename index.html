@@ -221,22 +221,24 @@ const uid = () => ++_uid;
 //   exact+higher — 100% if Actual >= Target (meeting or exceeding is full score)
 //   exact+lower  — 100% if Actual <= Target (meeting or going below is full score)
 const compute = row => {
-  const t = Number(row.target), a = Number(row.actual);
+  // Blank actual = not yet provided — excluded from scoring
+  const actualRaw = row.actual;
+  const hasActual = actualRaw !== "" && actualRaw !== null && actualRaw !== undefined;
+  if (!hasActual) {
+    return { ...row, actual: "", pct: null, scoreEquivalent: 0 };
+  }
+  const t = Number(row.target), a = Number(actualRaw);
   const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
   let pct;
   if (ft === "exact+higher" || ft === "higher+exact") {
-    // Full score when actual meets or exceeds target; scales down below
     pct = t === 0 ? (a >= 0 ? 100 : 0) : a >= t ? 100 : Math.max((a / t) * 100, 0);
   } else if (ft === "exact+lower" || ft === "lower+exact") {
-    // Full score when actual meets or goes below target; scales down above
     pct = t === 0 ? (a === 0 ? 100 : 0) : a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
   } else if (ft === "exact") {
-    // Strict exact: 100% only if identical, else proportional
     pct = t === 0 ? (a === 0 ? 100 : 0) : a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
   } else if (ft === "lower") {
     pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((t / (a || 0.0001)) * 100, 100);
   } else {
-    // higher (default)
     pct = t === 0 ? (a === 0 ? 100 : 0) : Math.min((a / t) * 100, 100);
   }
   pct = Math.max(0, Math.min(100, pct));
@@ -293,7 +295,7 @@ function parseCSV(rawText) {
     const n = h.replace(/"/g,"").trim().toLowerCase();
     return ALIAS[n] !== undefined ? ALIAS[n] : n;
   });
-  const NEED = ["department","keyresult","target","actual"];
+  const NEED = ["department","keyresult","target"];
   const miss = NEED.filter(n => !hdrs.includes(n));
   if (miss.length) return { rows:[], errors:[`Missing required columns: ${miss.join(", ")}.\nDetected headers: ${rawHdrs.join(" | ")}`] };
   const rows = [], errors = [];
@@ -307,8 +309,12 @@ function parseCSV(rawText) {
       return;
     }
     const w = o.weight ? parseFloat(o.weight) : 100;
-    const t = parseFloat(o.target), a = parseFloat(o.actual);
-    if (isNaN(t) || isNaN(a)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Target/Actual must be numbers — skipped`); return; }
+    const t = parseFloat(o.target);
+    if (isNaN(t)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Target must be a number — skipped`); return; }
+    // Blank actual is allowed — means "not yet provided"
+    const actualRaw = o.actual !== undefined ? o.actual.trim() : "";
+    const a = actualRaw === "" ? "" : parseFloat(actualRaw);
+    if (actualRaw !== "" && isNaN(a)) { errors.push(`Row ${i+2} [${o.keyresult.slice(0,25)}]: Actual must be a number or blank — skipped`); return; }
     // Normalize formula: accept "exact,higher" / "exact higher" / "exact+higher" → "exact+higher"
     const rawFt = (o.formulatype || "").toLowerCase().trim().replace(/[,\s]+/g, "+");
     // Also accept reversed combos
@@ -839,7 +845,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
   });
   const [confirmDel, setConfirmDel] = useState(false);
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
-  const valid = form.department && form.keyResult && form.weight && form.target && String(form.actual).trim() !== "";
+  const valid = form.department && form.keyResult && form.weight && form.target !== "";
   const ist = {width:"100%",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"};
   const lbl = t => <label style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>{t}</label>;
   const chiefCol = CHIEF_COLORS[row.chiefGroup||getChief(row.department)]||C.muted;
@@ -879,16 +885,20 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
         {!editing && (
           <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
-              {[["Target",Number(row.target).toLocaleString(),C.muted],["Actual",Number(row.actual).toLocaleString(),C.text],["% Done",`${row.pct}%`,sc(row.pct)]].map(([l,v,col])=>(
+              {[
+                ["Target", Number(row.target).toLocaleString(), C.muted],
+                ["Actual", row.actual===""||row.actual===null||row.actual===undefined ? "—" : Number(row.actual).toLocaleString(), row.actual===""||row.actual===null||row.actual===undefined ? C.muted : C.text],
+                ["% Done", row.pct===null ? "—" : `${row.pct}%`, row.pct===null ? C.muted : sc(row.pct)],
+              ].map(([l,v,col])=>(
                 <div key={l} style={{background:C.surface,borderRadius:9,padding:"10px 12px"}}>
                   <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.2,marginBottom:4}}>{l}</div>
                   <div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue',sans-serif"}}>{v}</div>
                 </div>
               ))}
             </div>
-            <Bar pct={row.pct} color={sc(row.pct)} h={8}/>
+            {row.pct !== null ? <Bar pct={row.pct} color={sc(row.pct)} h={8}/> : <div style={{height:8,background:C.border,borderRadius:99,overflow:"hidden"}}><div style={{width:"0%",height:"100%"}}/></div>}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}}>
-              <Badge score={row.pct}/>
+              {row.pct !== null ? <Badge score={row.pct}/> : <span style={{fontSize:11,padding:"3px 10px",borderRadius:99,background:`${C.muted}18`,color:C.muted,fontWeight:700,border:`1px solid ${C.muted}33`}}>— No Data</span>}
               {row.targetDate&&<span style={{fontSize:11,color:C.muted}}>📅 {row.targetDate}</span>}
             </div>
             <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
@@ -916,7 +926,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               <div style={{marginBottom:11}}>{lbl("Target Date")}<input value={form.targetDate} onChange={set("targetDate")} placeholder="Dec 31 2026" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
                 <div>{lbl("Target")}<input type="number" value={form.target} onChange={set("target")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-                <div>{lbl("Actual")}<input type="number" value={form.actual} onChange={set("actual")} style={{...ist,borderColor:C.green}} onFocus={e=>e.target.style.borderColor=C.green} onBlur={e=>e.target.style.borderColor=C.green}/></div>
+                <div>{lbl("Actual (optional)")}<input type="number" value={form.actual} onChange={set("actual")} placeholder="Leave blank if not yet provided" style={{...ist,borderColor:C.green}} onFocus={e=>e.target.style.borderColor=C.green} onBlur={e=>e.target.style.borderColor=C.green}/></div>
               </div>
               <div style={{marginBottom:16}}>
                 {lbl("Formula Type — How is performance measured?")}
@@ -967,7 +977,7 @@ const FormulaSelector = ({value, onChange}) => {
 const AddKRModal = ({onClose, onSave}) => {
   const [form,setForm] = useState({chiefGroup:"",department:"",_deptMode:"list",keyResult:"",targetDate:"",target:"",actual:"",weight:100,formulaType:"higher"});
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
-  const valid = form.department&&form.keyResult&&form.target&&String(form.actual).trim()!=="";
+  const valid = form.department&&form.keyResult&&form.target!=="";
   const ist = {width:"100%",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"};
   const lbl = t => <label style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>{t}</label>;
   return (
@@ -986,7 +996,7 @@ const AddKRModal = ({onClose, onSave}) => {
         <div style={{marginBottom:11}}>{lbl("Target Date")}<input value={form.targetDate} onChange={set("targetDate")} placeholder="Dec 31 2026" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
           <div>{lbl("Target *")}<input type="number" value={form.target} onChange={set("target")} placeholder="100" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-          <div>{lbl("Actual *")}<input type="number" value={form.actual} onChange={set("actual")} placeholder="0" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
+          <div>{lbl("Actual (optional)")}<input type="number" value={form.actual} onChange={set("actual")} placeholder="Leave blank if not yet provided" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
         </div>
         <div style={{marginBottom:16}}>
           {lbl("Formula Type — How is performance measured?")}
@@ -1004,8 +1014,8 @@ const AddKRModal = ({onClose, onSave}) => {
 // ─── AI INSIGHTS ──────────────────────────────────────────────────────────────
 function getInsights(rows) {
   const deptMap = {};
-  rows.forEach(r => { const d=r.department; if(!deptMap[d]) deptMap[d]={chief:r.chiefGroup||getChief(r.department),krs:[],w:0,s:0}; deptMap[d].krs.push(r); deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
-  const totW=rows.reduce((s,r)=>s+r.weight,0), totS=rows.reduce((s,r)=>s+r.scoreEquivalent,0);
+  rows.forEach(r => { const d=r.department; if(!deptMap[d]) deptMap[d]={chief:r.chiefGroup||getChief(r.department),krs:[],w:0,s:0}; deptMap[d].krs.push(r); if(r.pct!==null){deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent;} });
+  const totW=rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0), totS=rows.reduce((s,r)=>s+r.scoreEquivalent,0);
   const ovPct=totW>0?((totS/totW)*100).toFixed(1):"0.0";
   const summary=Object.entries(deptMap).map(([name,d])=>{
     const pct=d.w>0?((d.s/d.w)*100).toFixed(1):"0.0";
@@ -1449,13 +1459,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const historyData = useMemo(() => years.map(y => {
     const yRows = (yearStore[y]||{}).rows || [];
-    const totW = yRows.reduce((s,r)=>s+r.weight,0);
+    const totW = yRows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
     const totS = yRows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const pct  = totW > 0 ? (totS/totW)*100 : 0;
     const deptMap = {};
-    yRows.forEach(r=>{ const d=r.department; if(!deptMap[d])deptMap[d]={w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
+    yRows.forEach(r=>{ const d=r.department; if(!deptMap[d])deptMap[d]={w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; if(r.pct!==null){deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent;} });
     const depts = Object.entries(deptMap).map(([name,d])=>({name,chief:d.chief,pct:d.w>0?(d.s/d.w)*100:0})).sort((a,b)=>b.pct-a.pct);
-    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>r.pct>=80).length, atRisk:yRows.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:yRows.filter(r=>r.pct<60).length };
+    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>r.pct!==null&&r.pct>=80).length, atRisk:yRows.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80).length, offTrack:yRows.filter(r=>r.pct!==null&&r.pct<60).length };
   }), [yearStore, years]);
 
   const allDepts = useMemo(()=>[...new Set(rows.map(r=>r.department))].sort(),[rows]);
@@ -1463,17 +1473,18 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const deptStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent; });
-    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); if(r.pct!==null){map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent;} });
+    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct!==null&&k.pct<60).length })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   const chiefStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent; });
-    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
+    rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); if(r.pct!==null){map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent;} });
+    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct!==null&&k.pct<60).length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
-  const totW=useMemo(()=>rows.reduce((s,r)=>s+r.weight,0),[rows]);
+  // Only scored rows (with actual provided) count toward totals
+  const totW=useMemo(()=>rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0),[rows]);
   const totS=useMemo(()=>rows.reduce((s,r)=>s+r.scoreEquivalent,0),[rows]);
   const ovPct=totW>0?(totS/totW)*100:0;
 
@@ -1482,13 +1493,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setRankPage(1);
     let base = rows;
     if(filterType!=="ALL"){ if(CHIEF_NAMES.includes(filterType)){ if(selDept) base=rows.filter(r=>r.department===selDept); else base=rows.filter(r=>(r.chiefGroup||getChief(r.department))===filterType); } }
-    if(statusFilter==="on-track") base=base.filter(r=>r.pct>=80);
-    else if(statusFilter==="at-risk") base=base.filter(r=>r.pct>=60&&r.pct<80);
-    else if(statusFilter==="off-track") base=base.filter(r=>r.pct<60);
+    if(statusFilter==="on-track") base=base.filter(r=>r.pct!==null&&r.pct>=80);
+    else if(statusFilter==="at-risk") base=base.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80);
+    else if(statusFilter==="off-track") base=base.filter(r=>r.pct!==null&&r.pct<60);
     return base;
   },[rows,filterType,selDept,statusFilter]);
 
-  const visW=visibleRows.reduce((s,r)=>s+r.weight,0);
+  const visW=visibleRows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
   const visS=visibleRows.reduce((s,r)=>s+r.scoreEquivalent,0);
   const visPct=visW>0?(visS/visW)*100:0;
 
@@ -1552,7 +1563,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     const slbl = p => p>=80?"On Track":p>=60?"At Risk":"Off Track";
     const sbg  = p => p>=80?"#f0fdf4":p>=60?"#fffbeb":"#fef2f2";
     const esc  = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    const totW2 = rows.reduce((s,r)=>s+r.weight,0);
+    const totW2 = rows.filter(r=>r.pct!==null).reduce((s,r)=>s+r.weight,0);
     const totS2 = rows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const ovPct2 = totW2>0?(totS2/totW2)*100:0;
     const deptMap2 = {};
@@ -2232,7 +2243,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <div><div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5}}>{filterType==="ALL"?"Overall":selDept?selDept:filterType}</div><div style={{fontSize:26,fontWeight:800,fontFamily:"'Bebas Neue'",color:visibleRows.length?sc(visPct):C.muted,letterSpacing:1}}>{visibleRows.length?visPct.toFixed(1)+"%":"—"}</div></div>
                 <div style={{flex:1,minWidth:100}}><Bar pct={visPct} color={sc(visPct)} h={10}/></div>
                 <div style={{display:"flex",gap:14}}>
-                  {[["✓",visibleRows.filter(r=>r.pct>=80).length,C.green],["⚠",visibleRows.filter(r=>r.pct>=60&&r.pct<80).length,C.amber],["✕",visibleRows.filter(r=>r.pct<60).length,C.red]].map(([ic,n,col])=>(
+                  {[["✓",visibleRows.filter(r=>r.pct!==null&&r.pct>=80).length,C.green],["⚠",visibleRows.filter(r=>r.pct!==null&&r.pct>=60&&r.pct<80).length,C.amber],["✕",visibleRows.filter(r=>r.pct!==null&&r.pct<60).length,C.red]].map(([ic,n,col])=>(
                     <div key={ic} style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue'"}}>{n}</div><div style={{fontSize:10,color:C.muted}}>{ic}</div></div>
                   ))}
                 </div>
@@ -2298,10 +2309,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.keyResult}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{row.targetDate||"—"}</span></td>
                                 <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:C.text}}>{Number(row.actual).toLocaleString()}</span></td>
+                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"—":Number(row.actual).toLocaleString()}</span></td>
                                 <td style={{padding:"0 6px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
-                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><Badge score={row.pct} small/></td>
+                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:row.pct===null?C.muted:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct===null?"—":`${row.pct}%`}</span></td>
+                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{row.pct===null?<span style={{fontSize:10,padding:"2px 9px",borderRadius:99,background:`${C.muted}18`,color:C.muted,fontWeight:700,border:`1px solid ${C.muted}33`,whiteSpace:"nowrap"}}>— No Data</span>:<Badge score={row.pct} small/>}</td>
                               </tr>
                             );
                           })}
