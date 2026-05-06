@@ -1184,7 +1184,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               <div style={{marginBottom:11}}>
                 {lbl("Quarterly Actuals vs Target")}
                 <QTrendChart row={{...row,...form,qActuals:form.qActuals||{}}} readOnly={false}
-                  onQChange={(q,val)=>setForm(p=>({...p,qActuals:{...(p.qActuals||{}),[q]:val===""?"":+val}}))}/>
+                  onQChange={(q,val)=>setForm(p=>({...p,qActuals:{...(p.qActuals||{}),[q]:val}}))}/>
               </div>
 
               {/* Actual — read-only, auto-populated from latest quarter */}
@@ -2041,10 +2041,16 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     setShowAdd(false); toast$("KR added ✓");
   };
   const handleUpdate = (form,editId) => {
-    const qa = form.qActuals||{Q1:"",Q2:"",Q3:"",Q4:""};
-    // Auto-populate actual from latest recorded quarterly value
+    // Sanitize qActuals: blank/null → "", valid number string → number
+    const rawQa = form.qActuals||{Q1:"",Q2:"",Q3:"",Q4:""};
+    const qa = {};
+    ["Q1","Q2","Q3","Q4"].forEach(q=>{
+      const v = rawQa[q];
+      qa[q] = (v===""||v===null||v===undefined) ? "" : +v;
+    });
+    // Auto-populate actual from latest non-blank quarterly value
     const latestQ = ["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
-    const actualVal = latestQ ? +qa[latestQ] : (String(form.actual).trim()===""?"":+form.actual);
+    const actualVal = latestQ ? qa[latestQ] : "";
     const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher",qActuals:qa});
     setRows(prev => { const next=prev.map(r=>r.id===editId?nr:r); saveRows(next); return next; });
     setDetailRow(null); toast$("KR updated ✓");
