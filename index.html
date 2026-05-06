@@ -79,9 +79,10 @@ const db      = window.__db;
 const USE_FB  = window.__firebaseReady;
 
 const LS_KEYS = {
-  yearStore: "okr_yearStore",
-  years:     "okr_years",
-  users:     "okr_users",
+  yearStore:    "okr_yearStore",
+  years:        "okr_years",
+  users:        "okr_users",
+  customDepts:  "okr_customDepts",
 };
 
 const lsSave = (key, value) => {
@@ -107,6 +108,10 @@ const rtGet = async (path) => {
 const saveUsers = async (users) => {
   lsSave(LS_KEYS.users, users);
   await rtSet("users", users);
+};
+const saveCustomDepts = async (customDepts) => {
+  lsSave(LS_KEYS.customDepts, customDepts);
+  await rtSet("customDepts", customDepts);
 };
 const saveYears = async (years) => {
   lsSave(LS_KEYS.years, years);
@@ -138,8 +143,9 @@ const loadAllFromFirebase = async () => {
     const root = snap.val();
     if (!root) return null;
 
-    const users     = root.users || null;
-    const years     = root.years || null;
+    const users       = root.users || null;
+    const years       = root.years || null;
+    const customDepts = root.customDepts || [];
     if (!years || !years.length) return null;
 
     const yearStore = {};
@@ -151,7 +157,7 @@ const loadAllFromFirebase = async () => {
       };
     });
 
-    return { users, years, yearStore };
+    return { users, years, yearStore, customDepts };
   } catch(e) {
     console.warn("Firebase load failed, using localStorage cache:", e);
     return null;
@@ -192,7 +198,7 @@ const DEPT_LIST = [
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
   "Accounting and Finance (INC)","Accounting and Finance (SOL)",
   "Accounting and Finance (EMSI)","Cash Logistics","Finance Operations","Cash Management","Maintenance",
-  "Financial Data Management Support","Collection","Reconciliation","BD EMSI"
+  "Financial Data Management Support","Collection","Reconciliation","BD EMSI",
 ];
 
 const CHIEF_COLORS = { "President":"#f0b429","CSO":"#4f8ef7","COO":"#22d3a5","CFO":"#f75f5f","CITO":"#9b7ef8","EMSI":"#f5a623","Other":"#6b7399" };
@@ -568,7 +574,8 @@ const clearSession = () => { try { sessionStorage.removeItem(SESSION_KEY); } cat
 
 // ─── AUTH GATE ────────────────────────────────────────────────────────────────
 function AuthGate() {
-  const [users,    setUsers]    = useState(() => lsLoad(LS_KEYS.users, INITIAL_USERS_DEFAULT));
+  const [users,       setUsers]       = useState(() => lsLoad(LS_KEYS.users, INITIAL_USERS_DEFAULT));
+  const [customDepts, setCustomDepts] = useState(() => lsLoad(LS_KEYS.customDepts, []));
   const savedSession             = loadSession();
   const [authUser, setAuthUser] = useState(savedSession);
   const [screen,   setScreen]   = useState(savedSession ? "app" : "login");
@@ -579,6 +586,8 @@ function AuthGate() {
 
   // Persist users (Firebase + localStorage cache)
   useEffect(() => { saveUsers(users); }, [users]);
+  // Persist custom depts
+  useEffect(() => { saveCustomDepts(customDepts); }, [customDepts]);
 
   // ── Inactivity timer — resets on any user interaction ──
   useEffect(() => {
@@ -638,7 +647,7 @@ function AuthGate() {
   };
 
   if (screen === "app" && authUser) {
-    return <App authUser={authUser} users={users} onUsersChange={setUsers} onLogout={logout}/>;
+    return <App authUser={authUser} users={users} onUsersChange={setUsers} customDepts={customDepts} onCustomDeptsChange={setCustomDepts} onLogout={logout}/>;
   }
 
   return (
@@ -1073,7 +1082,7 @@ const QTrendChart = ({ row, readOnly, onQChange }) => {
   );
 };
 
-const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
+const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false, deptList, chiefGroups, getChiefFn}) => {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
     chiefGroup: row.chiefGroup||"", department: row.department, _deptMode: "list",
@@ -1165,11 +1174,11 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
           ) : (
             <div>
               <div style={{fontSize:12,fontWeight:700,color:C.accent,marginBottom:14,textTransform:"uppercase",letterSpacing:1.5}}>Edit Key Result</div>
-              <div style={{marginBottom:11}}>{lbl("Chief Group")}<select value={form.chiefGroup} onChange={set("chiefGroup")} style={{...ist,cursor:"pointer"}}><option value="">— Select —</option>{CHIEF_NAMES.map(c=><option key={c} value={c}>{c}</option>)}<option value="Other">Other</option></select></div>
+              <div style={{marginBottom:11}}>{lbl("Chief Group")}<select value={form.chiefGroup} onChange={set("chiefGroup")} style={{...ist,cursor:"pointer"}}><option value="">— Select —</option>{Object.keys(chiefGroups||CHIEFS_GROUPS).map(c=><option key={c} value={c}>{c}</option>)}<option value="Other">Other</option></select></div>
               <div style={{marginBottom:11}}>
                 {lbl("Department")}
-                <select value={form._deptMode==="other"?"__other__":form.department} onChange={e=>{const v=e.target.value;if(v==="__other__") setForm(p=>({...p,_deptMode:"other",department:""}));else{const auto=getChief(v);setForm(p=>({...p,_deptMode:"list",department:v,chiefGroup:auto!=="Other"?auto:p.chiefGroup}));}}} style={{...ist,cursor:"pointer",marginBottom:form._deptMode==="other"?6:0}}>
-                  <option value="">— Select Department —</option>{DEPT_LIST.map(d=><option key={d} value={d}>{d}</option>)}<option value="__other__">➕ Other</option>
+                <select value={form._deptMode==="other"?"__other__":form.department} onChange={e=>{const v=e.target.value;if(v==="__other__") setForm(p=>({...p,_deptMode:"other",department:""}));else{const auto=(getChiefFn||getChief)(v);setForm(p=>({...p,_deptMode:"list",department:v,chiefGroup:p.chiefGroup?p.chiefGroup:(auto!=="Other"?auto:"")}));}}} style={{...ist,cursor:"pointer",marginBottom:form._deptMode==="other"?6:0}}>
+                  <option value="">— Select Department —</option>{(deptList||DEPT_LIST).map(d=>{const _c=(getChiefFn||getChief)(d,"Other");const _hint=_c!=="Other"?` (${_c})`:"";return <option key={d} value={d}>{d}{_hint}</option>;})}<option value="__other__">➕ Other</option>
                 </select>
                 {form._deptMode==="other"&&<input value={form.department} onChange={e=>setForm(p=>({...p,department:e.target.value}))} placeholder="Type department name…" style={{...ist,borderColor:C.gold}} autoFocus/>}
               </div>
@@ -1249,7 +1258,7 @@ const FormulaSelector = ({value, onChange}) => {
   );
 };
 
-const AddKRModal = ({onClose, onSave}) => {
+const AddKRModal = ({onClose, onSave, deptList, chiefGroups, getChiefFn}) => {
   const [form,setForm] = useState({chiefGroup:"",department:"",_deptMode:"list",keyResult:"",targetDate:"",target:"",actual:"",weight:100,formulaType:"higher"});
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
   const valid = form.department&&form.keyResult&&form.target!=="";
@@ -1259,10 +1268,10 @@ const AddKRModal = ({onClose, onSave}) => {
     <div style={{position:"fixed",inset:0,background:"#000d",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
       <div onClick={e=>e.stopPropagation()} style={{background:C.card,border:`1px solid ${C.accent}44`,borderRadius:20,padding:"22px 20px",width:"min(500px,96vw)",boxShadow:`0 0 60px ${C.accent}11`,maxHeight:"92vh",overflowY:"auto"}}>
         <h2 style={{margin:"0 0 16px",color:C.text,fontSize:18,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2}}>+ ADD KEY RESULT</h2>
-        <div style={{marginBottom:11}}>{lbl("Chief Group")}<select value={form.chiefGroup} onChange={set("chiefGroup")} style={{...ist,cursor:"pointer"}}><option value="">— Select —</option>{CHIEF_NAMES.map(c=><option key={c} value={c}>{c}</option>)}<option value="Other">Other</option></select></div>
+        <div style={{marginBottom:11}}>{lbl("Chief Group")}<select value={form.chiefGroup} onChange={set("chiefGroup")} style={{...ist,cursor:"pointer"}}><option value="">— Select —</option>{Object.keys(chiefGroups||CHIEFS_GROUPS).map(c=><option key={c} value={c}>{c}</option>)}<option value="Other">Other</option></select></div>
         <div style={{marginBottom:11}}>{lbl("Department *")}
-          <select value={form._deptMode==="other"?"__other__":form.department} onChange={e=>{const v=e.target.value;if(v==="__other__") setForm(p=>({...p,_deptMode:"other",department:""}));else{const a=getChief(v);setForm(p=>({...p,_deptMode:"list",department:v,chiefGroup:a!=="Other"?a:p.chiefGroup}));}}} style={{...ist,cursor:"pointer",marginBottom:form._deptMode==="other"?6:0}}>
-            <option value="">— Select Department —</option>{DEPT_LIST.map(d=><option key={d} value={d}>{d}</option>)}<option value="__other__">➕ Other</option>
+          <select value={form._deptMode==="other"?"__other__":form.department} onChange={e=>{const v=e.target.value;if(v==="__other__") setForm(p=>({...p,_deptMode:"other",department:""}));else{const a=(getChiefFn||getChief)(v);setForm(p=>({...p,_deptMode:"list",department:v,chiefGroup:p.chiefGroup?p.chiefGroup:(a!=="Other"?a:"")}));}}} style={{...ist,cursor:"pointer",marginBottom:form._deptMode==="other"?6:0}}>
+            <option value="">— Select Department —</option>{(deptList||DEPT_LIST).map(d=>{const _c=(getChiefFn||getChief)(d,"Other");const _hint=_c!=="Other"?` (${_c})`:"";return <option key={d} value={d}>{d}{_hint}</option>;})}<option value="__other__">➕ Other</option>
           </select>
           {form._deptMode==="other"&&<input value={form.department} onChange={e=>setForm(p=>({...p,department:e.target.value}))} placeholder="Type department name…" style={{...ist,borderColor:C.gold}} autoFocus/>}
           {form.department&&form.chiefGroup&&<div style={{fontSize:11,color:CHIEF_COLORS[form.chiefGroup]||C.muted,marginTop:3}}>↳ {form.chiefGroup}</div>}
@@ -1337,7 +1346,7 @@ const ALL_DEPTS_LIST = [
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
   "Accounting and Finance (INC)","Accounting and Finance (SOL)",
   "Accounting and Finance (EMSI)","Cash Logistics","Finance Operations","Cash Management","Maintenance",
-  "Financial Data Management Support","Collection","Reconciliation","BD EMSI"
+  "Financial Data Management Support","Collection","Reconciliation","BD EMSI",
 ];
 
 const CURRENT_YEAR = new Date().getFullYear();
@@ -1392,12 +1401,15 @@ const OFFICIAL_DEPTS = new Set([
   "Research and Development","Governance, Risk and Compliance","CHD (Frontline)","CHD (Backend)",
   "Accounting and Finance (INC)","Accounting and Finance (EMSI)","Accounting and Finance (SOL)",
   "Cash Logistics","Finance Operations","Cash Management","Maintenance",
-  "Financial Data Management Support","Collection","Reconciliation","BD EMSI",
+  "Financial Data Management Support","Collection","Reconciliation",
 ]);
 
 // Also accept trimmed variants (e.g. "Supply Chain " with trailing space from old data)
 const isDeptOfficial = (dept) => {
   const t = (dept||"").trim();
+  // Allow custom departments registered at runtime
+  const customList = window.__customDepts || [];
+  if (customList.some(cd => cd.name.trim() === t)) return true;
   // Reject if trimmed name is not in official set
   if (!OFFICIAL_DEPTS.has(t)) return false;
   // Also reject known typos even if they somehow match after trim
@@ -1832,10 +1844,201 @@ function AIInsightsCard({ rows, allDepts, insights, setInsights, loadingAI, load
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
-function App({ authUser, users, onUsersChange, onLogout }) {
+
+// ─── DEPARTMENT MANAGEMENT MODAL ─────────────────────────────────────────────
+function DeptMgmtModal({ customDepts, onClose, onSave }) {
+  const C2 = { bg:"#0a0c14",card:"#161b2e",surface:"#111420",border:"#1e2640",accent:"#4f8ef7",text:"#e8eaf2",muted:"#6b7399",red:"#f75f5f",green:"#22d3a5",gold:"#f0b429",purple:"#9b7ef8" };
+  const ALL_CHIEFS = Object.keys(CHIEFS_GROUPS);
+  const [list, setList] = useState((customDepts || []).map(d => ({...d})));
+  const [form, setForm] = useState({ name: "", chief: "" });
+  const [err,  setErr]  = useState("");
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  // All dept names (built-in + custom) for duplicate check
+  const allBuiltIn = new Set(DEPT_LIST.map(d => d.toLowerCase().trim()));
+
+  const addDept = () => {
+    const name  = form.name.trim();
+    const chief = form.chief.trim();
+    if (!name)  { setErr("Department name is required."); return; }
+    if (!chief) { setErr("Chief Group assignment is required."); return; }
+    if (allBuiltIn.has(name.toLowerCase())) { setErr(`"${name}" already exists as a built-in department.`); return; }
+    if (list.some(d => d.name.toLowerCase() === name.toLowerCase())) { setErr(`"${name}" already exists.`); return; }
+    setList(p => [...p, { id: "cd_" + Date.now(), name, chief }]);
+    setForm({ name: "", chief: "" });
+    setErr("");
+  };
+
+  const deleteDept = (id) => {
+    setList(p => p.filter(d => d.id !== id));
+    setConfirmDel(null);
+  };
+
+  const ist = { width:"100%", background:C2.surface, border:`1px solid ${C2.border}`, borderRadius:8, padding:"9px 12px", color:C2.text, fontSize:13, outline:"none", boxSizing:"border-box" };
+  const lbl = t => <label style={{fontSize:10,color:C2.muted,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>{t}</label>;
+
+  // Group list by chief for display
+  const grouped = {};
+  ALL_CHIEFS.forEach(c => { grouped[c] = []; });
+  list.forEach(d => {
+    if (!grouped[d.chief]) grouped[d.chief] = [];
+    grouped[d.chief].push(d);
+  });
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(10,12,20,.85)",zIndex:800,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C2.card,border:`1px solid ${C2.purple}44`,borderRadius:20,width:"min(680px,96vw)",maxHeight:"92vh",display:"flex",flexDirection:"column",boxShadow:"0 20px 60px rgba(0,0,0,.5)"}}>
+
+        {/* Header */}
+        <div style={{padding:"18px 24px",borderBottom:`1px solid ${C2.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+          <div>
+            <h2 style={{margin:0,fontSize:18,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:2,color:C2.text}}>🏢 DEPARTMENT MANAGEMENT</h2>
+            <p style={{margin:"3px 0 0",fontSize:12,color:C2.muted}}>Add custom departments and assign them to a Chief Group</p>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:`1px solid ${C2.border}`,color:C2.muted,borderRadius:8,padding:"5px 11px",cursor:"pointer",fontSize:14}}>✕</button>
+        </div>
+
+        <div style={{overflowY:"auto",flex:1,padding:"18px 24px",display:"flex",flexDirection:"column",gap:20}}>
+
+          {/* Add form */}
+          <div style={{background:`${C2.purple}08`,border:`1px solid ${C2.purple}22`,borderRadius:12,padding:16}}>
+            <div style={{fontSize:11,color:C2.purple,fontWeight:700,textTransform:"uppercase",letterSpacing:1.5,marginBottom:12}}>➕ Add New Department</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+              <div>
+                {lbl("Department Name *")}
+                <input
+                  value={form.name}
+                  onChange={e => { setForm(p=>({...p,name:e.target.value})); setErr(""); }}
+                  onKeyDown={e => e.key==="Enter" && addDept()}
+                  placeholder="e.g. Digital Transformation"
+                  style={ist}
+                  onFocus={e=>e.target.style.borderColor=C2.purple}
+                  onBlur={e=>e.target.style.borderColor=C2.border}
+                />
+              </div>
+              <div>
+                {lbl("Assign to Chief Group *")}
+                <select
+                  value={form.chief}
+                  onChange={e => { setForm(p=>({...p,chief:e.target.value})); setErr(""); }}
+                  style={{...ist, cursor:"pointer"}}
+                  onFocus={e=>e.target.style.borderColor=C2.purple}
+                  onBlur={e=>e.target.style.borderColor=C2.border}
+                >
+                  <option value="">— Select Chief Group —</option>
+                  {ALL_CHIEFS.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {err && <div style={{fontSize:12,color:C2.red,marginBottom:10,padding:"6px 10px",background:`${C2.red}12`,borderRadius:6}}>{err}</div>}
+            <button onClick={addDept} style={{padding:"9px 20px",borderRadius:8,border:"none",background:`linear-gradient(135deg,${C2.purple},${C2.accent})`,color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>
+              ➕ Add Department
+            </button>
+          </div>
+
+          {/* Note about built-in depts */}
+          <div style={{background:`${C2.accent}08`,border:`1px solid ${C2.accent}22`,borderRadius:10,padding:"12px 14px",fontSize:11,color:C2.muted,lineHeight:1.7}}>
+            <b style={{color:C2.accent}}>Note:</b> Built-in departments (Legal, Marketing, Engineering, etc.) are managed by the system. Only <b style={{color:C2.text}}>custom departments</b> you add here are shown below.
+          </div>
+
+          {/* Custom depts list grouped by chief */}
+          <div>
+            <div style={{fontSize:11,color:C2.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:1.5,marginBottom:10}}>
+              Custom Departments ({list.length})
+            </div>
+            {list.length === 0 ? (
+              <div style={{textAlign:"center",padding:"24px",color:C2.muted,fontSize:13,background:C2.surface,borderRadius:10,border:`1px dashed ${C2.border}`}}>
+                No custom departments yet. Add one above.
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {Object.entries(grouped).filter(([,depts])=>depts.length>0).map(([chief,depts])=>{
+                  const cc = CHIEF_COLORS[chief] || C2.muted;
+                  return (
+                    <div key={chief}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                        <div style={{width:8,height:8,borderRadius:99,background:cc,flexShrink:0}}/>
+                        <span style={{fontSize:11,fontWeight:700,color:cc,textTransform:"uppercase",letterSpacing:1}}>{chief}</span>
+                        <span style={{fontSize:10,color:C2.muted}}>({depts.length})</span>
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:6,paddingLeft:16}}>
+                        {depts.map(d => (
+                          <div key={d.id} style={{display:"flex",alignItems:"center",gap:10,background:C2.surface,border:`1px solid ${C2.border}`,borderRadius:9,padding:"10px 14px"}}>
+                            <div style={{width:28,height:28,borderRadius:8,background:`${cc}22`,border:`1px solid ${cc}44`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:cc,flexShrink:0}}>
+                              {d.name[0].toUpperCase()}
+                            </div>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:13,fontWeight:700,color:C2.text}}>{d.name}</div>
+                              <div style={{fontSize:10,color:cc,fontWeight:600}}>→ {chief}</div>
+                            </div>
+                            <span style={{fontSize:9,padding:"2px 8px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700}}>Custom</span>
+                            {confirmDel === d.id ? (
+                              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                                <span style={{fontSize:11,color:C2.red}}>Delete?</span>
+                                <button onClick={()=>deleteDept(d.id)} style={{padding:"4px 10px",borderRadius:6,border:"none",background:C2.red,color:"#fff",cursor:"pointer",fontWeight:700,fontSize:11}}>Yes</button>
+                                <button onClick={()=>setConfirmDel(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C2.border}`,background:"transparent",color:C2.muted,cursor:"pointer",fontSize:11}}>No</button>
+                              </div>
+                            ) : (
+                              <button onClick={()=>setConfirmDel(d.id)} style={{background:"none",border:`1px solid ${C2.red}44`,color:C2.red,cursor:"pointer",fontSize:11,padding:"3px 9px",borderRadius:6,fontWeight:700}}>✕</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:"14px 24px",borderTop:`1px solid ${C2.border}`,display:"flex",justifyContent:"flex-end",gap:10,flexShrink:0}}>
+          <button onClick={onClose} style={{padding:"9px 18px",borderRadius:9,border:`1px solid ${C2.border}`,background:"transparent",color:C2.muted,cursor:"pointer",fontWeight:600}}>Cancel</button>
+          <button onClick={()=>onSave(list)} style={{padding:"9px 22px",borderRadius:9,border:"none",background:`linear-gradient(135deg,${C2.purple},${C2.accent})`,color:"#fff",cursor:"pointer",fontWeight:700}}>
+            ✓ Save Departments
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App({ authUser, users, onUsersChange, customDepts, onCustomDeptsChange, onLogout }) {
   const isReadOnly = (authUser||{}).role === "viewer";
   const isAdmin    = (authUser||{}).role === "admin";
-  const [showUserMgmt, setShowUserMgmt] = useState(false);
+  const [showUserMgmt,  setShowUserMgmt]  = useState(false);
+  const [showDeptMgmt,  setShowDeptMgmt]  = useState(false);
+
+  // ── Effective dept lists: built-ins + custom depts (reactive) ──────────────
+  const effectiveDeptList = useMemo(() => {
+    const custom = (customDepts || []);
+    const base = [...DEPT_LIST];
+    custom.forEach(cd => { if (!base.includes(cd.name)) base.push(cd.name); });
+    return base;
+  }, [customDepts]);
+
+  const effectiveChiefGroups = useMemo(() => {
+    const result = {};
+    Object.entries(CHIEFS_GROUPS).forEach(([chief, depts]) => { result[chief] = [...depts]; });
+    (customDepts || []).forEach(cd => {
+      if (!result[cd.chief]) result[cd.chief] = [];
+      if (!result[cd.chief].includes(cd.name)) result[cd.chief].push(cd.name);
+    });
+    return result;
+  }, [customDepts]);
+
+  const effectiveGetChief = (dept, fallback="Other") => {
+    // Check custom depts first
+    const cd = (customDepts || []).find(d => d.name.toLowerCase().trim() === (dept||"").toLowerCase().trim());
+    if (cd) return cd.chief;
+    return getChief(dept, fallback);
+  };
+
+  // ── Sync custom depts to window for isDeptOfficial (module-level fn) ──
+  useEffect(() => { window.__customDepts = customDepts || []; }, [customDepts]);
 
   // ── Year state — starts from localStorage cache, then syncs Firebase ──
   const [years,     setYears]     = useState(() => initYearsFromStorage());
@@ -1854,6 +2057,11 @@ function App({ authUser, users, onUsersChange, onLogout }) {
       if (result && result.yearStore) {
         // Update users if present
         if (result.users) { onUsersChange(result.users); lsSave(LS_KEYS.users, result.users); }
+        // Update custom depts if present
+        if (result.customDepts && result.customDepts.length) {
+          onCustomDeptsChange(result.customDepts);
+          lsSave(LS_KEYS.customDepts, result.customDepts);
+        }
         // Update years list
         if (result.years) { setYears(result.years); lsSave(LS_KEYS.years, result.years); }
         // Clean and apply yearStore — this is the source of truth
@@ -1997,13 +2205,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const deptStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent; });
+    rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||effectiveGetChief(r.department)}; map[r.department].krs.push(r); map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent; });
     return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>(k.status||"off-track")==="on-track").length,atRisk:d.krs.filter(k=>(k.status||"off-track")==="at-risk").length,offTrack:d.krs.filter(k=>(k.status||"off-track")==="off-track").length })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   const chiefStats = useMemo(()=>{
     const map={};
-    rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent; });
+    rows.forEach(r=>{ const chief=r.chiefGroup||effectiveGetChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent; });
     return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>(k.status||"off-track")==="on-track").length,atRisk:d.krs.filter(k=>(k.status||"off-track")==="at-risk").length,offTrack:d.krs.filter(k=>(k.status||"off-track")==="off-track").length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
@@ -2406,13 +2614,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     Object.entries(qStatus).forEach(([dept,data])=>{
       // Skip any department not in the official list — render-time safety net
       if (!isDeptOfficial(dept)) return;
-      // Always use the correct chief from CHIEFS_GROUPS, ignore stored value
-      const c = getChief(dept.trim(), data.chief||"Other");
+      // Use effectiveGetChief to handle custom departments
+      const c = effectiveGetChief(dept.trim(), data.chief||"Other");
       if(!map[c]) map[c]=[];
       map[c].push({dept:dept.trim(),...data,chief:c});
     });
     return map;
-  },[qStatus]);
+  },[qStatus, customDepts]);
 
   const saveIssue = (form,id) => { const rec={...form,id:id||uid(),createdAt:id?undefined:new Date().toLocaleDateString()}; if(id) setIssues(p=>p.map(i=>i.id===id?rec:i)); else setIssues(p=>[...p,rec]); setShowIssueForm(false); setEditIssue(null); toast$(id?"Issue updated.":"Issue logged."); };
   const deleteIssue = id => { setIssues(p=>p.filter(i=>i.id!==id)); toast$("Issue deleted.","warn"); };
@@ -2533,6 +2741,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <div style={{fontSize:9,color:ROLE_COLORS[(authUser||{}).role]||C.muted,fontWeight:700,textTransform:"uppercase"}}>{ROLE_LABELS[(authUser||{}).role]||"Viewer"}</div>
               </div>
               {isAdmin&&<button onClick={()=>setShowUserMgmt(true)} style={{padding:"5px 8px",borderRadius:7,border:`1px solid ${C.gold}44`,background:`${C.gold}12`,color:C.gold,cursor:"pointer",fontSize:11,fontWeight:700}}>👥</button>}
+            {isAdmin&&<button onClick={()=>setShowDeptMgmt(true)} style={{padding:"5px 8px",borderRadius:7,border:`1px solid ${C.purple}44`,background:`${C.purple}12`,color:C.purple,cursor:"pointer",fontSize:11,fontWeight:700}}>🏢</button>}
               <button onClick={onLogout} title="Sign Out" style={{padding:"5px 8px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:C.muted,cursor:"pointer",fontSize:12,fontWeight:700}}>⎋</button>
             </div>
           </div>
@@ -3177,13 +3386,14 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         </div>
       </div>
 
-      {showIssueForm&&<IssueFormModal issue={editIssue} deptList={ALL_DEPTS_LIST} onClose={()=>{setShowIssueForm(false);setEditIssue(null);}} onSave={saveIssue}/>}
+      {showIssueForm&&<IssueFormModal issue={editIssue} deptList={effectiveDeptList} onClose={()=>{setShowIssueForm(false);setEditIssue(null);}} onSave={saveIssue}/>}
       {showImport&&<ImportModal onParsed={handleParsed} onClose={()=>setShowImport(false)}/>}
       {previewData&&<PreviewModal preview={previewData.rows} existing={rows} errors={previewData.errors} onClose={()=>setPreviewData(null)} onConfirm={handleImportConfirm}/>}
-      {showAdd&&<AddKRModal onClose={()=>setShowAdd(false)} onSave={handleAdd}/>}
-      {detailRow&&<KRDetailModal row={detailRow} onClose={()=>setDetailRow(null)} onSave={handleUpdate} onDelete={handleDelete} readOnly={isReadOnly}/>}
+      {showAdd&&<AddKRModal onClose={()=>setShowAdd(false)} onSave={handleAdd} deptList={effectiveDeptList} chiefGroups={effectiveChiefGroups} getChiefFn={effectiveGetChief}/>}
+      {detailRow&&<KRDetailModal row={detailRow} onClose={()=>setDetailRow(null)} onSave={handleUpdate} onDelete={handleDelete} readOnly={isReadOnly} deptList={effectiveDeptList} chiefGroups={effectiveChiefGroups} getChiefFn={effectiveGetChief}/>}
       {showTemplate&&<TemplateModal onClose={()=>setShowTemplate(false)}/>}
-      {showUserMgmt&&<UserMgmtModal users={users} onClose={()=>setShowUserMgmt(false)} onSave={list=>{onUsersChange(list);setShowUserMgmt(false);toast$("Users saved.");}}/>}
+      {showUserMgmt&&<UserMgmtModal users={users} onClose={()=>setShowUserMgmt(false)} onSave={list=>{onUsersChange(list);setShowUserMgmt(false);toast$("Users saved.");}}/> }
+      {showDeptMgmt&&<DeptMgmtModal customDepts={customDepts} onClose={()=>setShowDeptMgmt(false)} onSave={list=>{onCustomDeptsChange(list);setShowDeptMgmt(false);toast$("Departments saved ✓");}}/>}
       {showPDFModal&&<PDFExportModal onClose={()=>setShowPDFModal(false)} onExport={(sel)=>{setShowPDFModal(false);buildAndDownloadPDF(sel);}} activeYear={activeYear} rows={rows} issues={issues}/>}
       {deptTrendModal&&<DeptTrendModal dept={deptTrendModal} onClose={()=>setDeptTrendModal(null)}/>}
     </>
