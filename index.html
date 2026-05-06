@@ -205,9 +205,18 @@ const getChief = (dept, fallback="Other") => {
   return entry ? entry[0] : fallback;
 };
 
-const sc = s => s>=80?C.green:s>=60?C.amber:C.red;
-const sl = s => s>=80?"On Track":s>=60?"At Risk":"Off Track";
-const si = s => s>=80?"✓":s>=60?"⚠":"✕";
+const sc = s => {
+  if (typeof s === "string") return s==="on-track"?C.green:s==="at-risk"?C.amber:C.red;
+  return s>=80?C.green:s>=60?C.amber:C.red;
+};
+const sl = s => {
+  if (typeof s === "string") return s==="on-track"?"On Track":s==="at-risk"?"At Risk":"Off Track";
+  return s>=80?"On Track":s>=60?"At Risk":"Off Track";
+};
+const si = s => {
+  if (typeof s === "string") return s==="on-track"?"✓":s==="at-risk"?"⚠":"✕";
+  return s>=80?"✓":s>=60?"⚠":"✕";
+};
 
 let _uid = Date.now();
 const uid = () => ++_uid;
@@ -236,18 +245,50 @@ const computePct = (row, actualVal) => {
   return +Math.max(0, Math.min(100, pct)).toFixed(1);
 };
 
+// Compute time-elapsed ratio from today relative to a target date.
+// Returns 0–1 representing how far through the KR period we are.
+// If no target date or unparseable, returns null (no time factor applied).
+const timeElapsedRatio = (targetDateStr) => {
+  if (!targetDateStr) return null;
+  const end = new Date(targetDateStr);
+  if (isNaN(end.getTime())) return null;
+  const now = new Date();
+  // Assume KR starts at beginning of the year in the target date
+  const start = new Date(end.getFullYear(), 0, 1);
+  const total = end - start;
+  if (total <= 0) return 1;
+  const elapsed = now - start;
+  return Math.max(0, Math.min(1, elapsed / total));
+};
+
+// Time-aware status: compares actual % done against expected % done at this point in time.
+// On Track: pct >= 80% of expected  |  At Risk: 50–80%  |  Off Track: <50%
+// If no target date: falls back to absolute thresholds (80/60)
+const timeAwareStatus = (pct, targetDateStr) => {
+  const ratio = timeElapsedRatio(targetDateStr);
+  if (ratio === null) {
+    return pct >= 80 ? "on-track" : pct >= 60 ? "at-risk" : "off-track";
+  }
+  const expected = ratio * 100; // expected % done by now
+  if (expected <= 0) return pct >= 80 ? "on-track" : pct >= 60 ? "at-risk" : "off-track";
+  const progress = expected > 0 ? (pct / expected) * 100 : 100; // how much of expected have we achieved
+  if (progress >= 80) return "on-track";
+  if (progress >= 50) return "at-risk";
+  return "off-track";
+};
+
 const compute = row => {
   const actualRaw = row.actual;
   const hasActual = actualRaw !== "" && actualRaw !== null && actualRaw !== undefined;
   // Blank actual = not yet provided → always 0%, actual stays blank
   if (!hasActual) {
-    return { ...row, actual: "", pct: 0, scoreEquivalent: 0 };
+    return { ...row, actual: "", pct: 0, scoreEquivalent: 0, status: "off-track" };
   }
   const t = Number(row.target), a = Number(actualRaw);
   // Target=0: only score 100% if actual is explicitly 0 (exact match achieved)
   if (t === 0) {
     const pct = a === 0 ? 100 : 0;
-    return { ...row, pct, scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
+    return { ...row, pct, scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2), status: timeAwareStatus(pct, row.targetDate) };
   }
   const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
   let pct;
@@ -264,7 +305,8 @@ const compute = row => {
   if (latestQ) {
     pct = computePct(row, qa[latestQ]);
   }
-  return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
+  const status = timeAwareStatus(pct, row.targetDate);
+  return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2), status };
 };
 
 const mkey = r => `${(r.department||"").trim().toLowerCase()}||${(r.keyResult||"").trim().toLowerCase()}`;
@@ -377,9 +419,10 @@ const Bar = ({pct,color,h=6}) => (
     <div style={{width:`${Math.min(pct,100)}%`,height:"100%",background:`linear-gradient(90deg,${color}44,${color})`,borderRadius:99,transition:"width .8s ease"}}/>
   </div>
 );
-const Badge = ({score,small}) => {
-  const col=sc(score);
-  return <span style={{display:"inline-flex",alignItems:"center",gap:3,padding:small?"2px 7px":"3px 10px",borderRadius:99,fontSize:small?10:11,fontWeight:700,background:`${col}18`,color:col,border:`1px solid ${col}44`,whiteSpace:"nowrap"}}>{si(score)} {sl(score)}</span>;
+const Badge = ({score, status, small}) => {
+  const key = status || (score>=80?"on-track":score>=60?"at-risk":"off-track");
+  const col = sc(key);
+  return <span style={{display:"inline-flex",alignItems:"center",gap:3,padding:small?"2px 7px":"3px 10px",borderRadius:99,fontSize:small?10:11,fontWeight:700,background:`${col}18`,color:col,border:`1px solid ${col}44`,whiteSpace:"nowrap"}}>{si(key)} {sl(key)}</span>;
 };
 
 // ─── MODALS ───────────────────────────────────────────────────────────────────
@@ -858,6 +901,178 @@ const PreviewModal = ({preview,existing,errors,onClose,onConfirm}) => {
   );
 };
 
+// ─── QUARTERLY TREND CHART ────────────────────────────────────────────────────
+// Shows Q1–Q4 target vs actual as grouped bars + line connecting actuals.
+// readOnly=true: view mode (no inputs). readOnly=false: shows inputs below bars.
+const QTrendChart = ({ row, readOnly, onQChange }) => {
+  const QLABELS = ["Q1","Q2","Q3","Q4"];
+  const Q_COLS  = ["#60a5fa","#34d399","#fbbf24","#f87171"];
+  const qa      = row.qActuals || {};
+  const target  = Number(row.target) || 0;
+  // Per-quarter expected target = total target / 4 (equal split per quarter)
+  const qTarget = target / 4;
+  const latestQ = ["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+  const hasAny  = QLABELS.some(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+
+  // Max value for bar scaling — use max of (target, max actual, 1)
+  const actuals = QLABELS.map(q=>{ const v=qa[q]; return (v!==""&&v!==null&&v!==undefined)?Number(v):null; });
+  const maxVal  = Math.max(target||1, ...actuals.filter(v=>v!==null), 1);
+
+  // SVG chart dimensions
+  const W=440, H=140, PAD_L=36, PAD_R=12, PAD_T=12, PAD_B=28;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+  const slotW  = innerW / 4;
+  const BAR_W  = slotW * 0.3;
+
+  const xMid = i => PAD_L + slotW * i + slotW / 2;
+  const yOf  = v => PAD_T + innerH - (v / maxVal) * innerH;
+
+  // Line path through actual points
+  const linePoints = actuals.map((v,i)=>v!==null?`${xMid(i)},${yOf(v)}`:null).filter(Boolean);
+
+  if (!hasAny && readOnly) return null;
+
+  return (
+    <div style={{marginTop:readOnly?14:0,background:C.surface,borderRadius:12,padding:"12px 14px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+        <span style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700}}>
+          📊 Quarterly Target vs Actual{latestQ?` · % based on ${latestQ}`:""}
+        </span>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <span style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:C.muted}}><span style={{display:"inline-block",width:10,height:3,background:C.border,borderRadius:99}}/> Target/Q</span>
+          <span style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:C.muted}}><span style={{display:"inline-block",width:10,height:3,background:C.accent,borderRadius:99}}/> Actual</span>
+        </div>
+      </div>
+
+      {/* SVG Chart */}
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",display:"block"}}>
+        {/* Y-axis grid + labels */}
+        {[0, 0.25, 0.5, 0.75, 1].map(frac=>{
+          const v = maxVal * frac;
+          const y = yOf(v);
+          return (
+            <g key={frac}>
+              <line x1={PAD_L} y1={y} x2={W-PAD_R} y2={y} stroke={C.border} strokeWidth="0.5" opacity="0.6"/>
+              <text x={PAD_L-4} y={y+3.5} textAnchor="end" fontSize="8" fill={C.muted}>
+                {v>=1000?`${(v/1000).toFixed(1)}k`:v.toFixed(v<10?1:0)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Annual target line (dashed) */}
+        {target>0&&<line x1={PAD_L} y1={yOf(target)} x2={W-PAD_R} y2={yOf(target)}
+          stroke={C.gold} strokeWidth="1" strokeDasharray="4,3" opacity="0.6"/>}
+        {target>0&&<text x={W-PAD_R+2} y={yOf(target)+3.5} fontSize="7.5" fill={C.gold} opacity="0.8">Annual</text>}
+
+        {/* Bars + Q labels */}
+        {QLABELS.map((q,i)=>{
+          const qCol  = Q_COLS[i];
+          const aVal  = actuals[i];
+          const isLat = q===latestQ;
+          const pct   = aVal!==null ? computePct(row, aVal) : null;
+          const statCol = pct!==null ? sc(pct) : C.muted;
+          const cx    = xMid(i);
+
+          // Target bar (grey, always shown if target > 0)
+          const tBarH = qTarget>0 ? (qTarget/maxVal)*innerH : 0;
+          const tBarY = PAD_T + innerH - tBarH;
+
+          // Actual bar
+          const aBarH = aVal!==null&&aVal>0 ? (aVal/maxVal)*innerH : 0;
+          const aBarY = PAD_T + innerH - aBarH;
+
+          return (
+            <g key={q}>
+              {/* Target bar */}
+              {tBarH>0&&<rect x={cx-BAR_W-1} y={tBarY} width={BAR_W} height={tBarH}
+                fill={C.border} opacity="0.5" rx="2"/>}
+              {/* Actual bar */}
+              {aVal!==null&&<rect x={cx+1} y={aBarY} width={BAR_W} height={Math.max(aBarH,1)}
+                fill={qCol} opacity={isLat?1:0.7} rx="2"/>}
+              {/* Latest marker */}
+              {isLat&&aVal!==null&&<rect x={cx+1} y={aBarY} width={BAR_W} height={Math.max(aBarH,1)}
+                fill="none" stroke={C.accent} strokeWidth="1.5" rx="2"/>}
+              {/* Q label */}
+              <text x={cx} y={H-PAD_B+10} textAnchor="middle" fontSize="9" fontWeight={isLat?"800":"600"}
+                fill={isLat?C.accent:C.muted}>{q}{isLat?" ★":""}</text>
+              {/* Actual value label above bar */}
+              {aVal!==null&&<text x={cx+1+BAR_W/2} y={Math.max(aBarY-3, PAD_T+3)} textAnchor="middle"
+                fontSize="7.5" fontWeight="700" fill={statCol}>
+                {aVal>=1000?`${(aVal/1000).toFixed(1)}k`:aVal}
+              </text>}
+              {/* % done label */}
+              {pct!==null&&<text x={cx+1+BAR_W/2} y={Math.min(aBarY+10, PAD_T+innerH-3)} textAnchor="middle"
+                fontSize="7" fill={statCol} opacity="0.85">{pct}%</text>}
+            </g>
+          );
+        })}
+
+        {/* Actual trend line */}
+        {linePoints.length>1&&<polyline points={linePoints.join(" ")} fill="none"
+          stroke={C.accent} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" opacity="0.8"/>}
+        {/* Dots on actuals */}
+        {actuals.map((v,i)=>v!==null&&<circle key={i} cx={xMid(i)} cy={yOf(v)} r="3"
+          fill={Q_COLS[i]} stroke={C.card} strokeWidth="1.5"/>)}
+      </svg>
+
+      {/* Edit mode: input row below chart */}
+      {!readOnly&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginTop:10}}>
+          {QLABELS.map((q,i)=>{
+            const qv  = qa[q];
+            const hasV= qv!==""&&qv!==null&&qv!==undefined;
+            const isLat=q===latestQ;
+            const qpct=hasV?computePct(row,qv):null;
+            const col = qpct!==null?sc(qpct):C.muted;
+            return (
+              <div key={q} style={{display:"flex",flexDirection:"column",gap:3}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:9,fontWeight:800,color:isLat?C.accent:Q_COLS[i]}}>{q}</span>
+                  {qpct!==null&&<span style={{fontSize:9,fontWeight:700,color:col}}>{qpct}%</span>}
+                </div>
+                <input
+                  type="number"
+                  value={hasV?qv:""}
+                  onChange={e=>onQChange(q,e.target.value)}
+                  placeholder={`Actual…`}
+                  style={{width:"100%",background:C.card,border:`1.5px solid ${isLat?C.accent:hasV?col+"88":C.border}`,borderRadius:7,padding:"6px 8px",color:C.text,fontSize:12,outline:"none",boxSizing:"border-box"}}
+                  onFocus={e=>e.target.style.borderColor=C.accent}
+                  onBlur={e=>e.target.style.borderColor=isLat?C.accent:hasV?col+"88":C.border}
+                />
+                <div style={{fontSize:8,color:C.muted,textAlign:"center"}}>Target: {qTarget>=1000?`${(qTarget/1000).toFixed(1)}k`:qTarget.toFixed(qTarget<10?1:0)}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* View mode: quick stat row */}
+      {readOnly&&hasAny&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginTop:8}}>
+          {QLABELS.map((q,i)=>{
+            const v=actuals[i]; const isLat=q===latestQ;
+            const pct=v!==null?computePct(row,v):null;
+            const col=pct!==null?sc(pct):C.border;
+            return (
+              <div key={q} style={{textAlign:"center",padding:"6px 4px",background:isLat?`${C.accent}0a`:C.card,borderRadius:8,border:`1px solid ${isLat?C.accent+"44":C.border}`}}>
+                <div style={{fontSize:8,color:isLat?C.accent:C.muted,fontWeight:700,marginBottom:2}}>{q}{isLat?" ★":""}</div>
+                {v!==null?(
+                  <>
+                    <div style={{fontSize:13,fontWeight:800,color:col}}>{pct}%</div>
+                    <div style={{fontSize:9,color:C.muted}}>{v>=1000?`${(v/1000).toFixed(1)}k`:v}</div>
+                  </>
+                ):<div style={{fontSize:11,color:C.border}}>—</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
@@ -920,44 +1135,24 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
                 </div>
               ))}
             </div>
-            <Bar pct={row.pct} color={sc(row.pct)} h={8}/>
+            <Bar pct={row.pct} color={sc(row.status||row.pct)} h={8}/>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10}}>
-              <Badge score={row.pct}/>
+              <Badge score={row.pct} status={row.status}/>
               {row.targetDate&&<span style={{fontSize:11,color:C.muted}}>📅 {row.targetDate}</span>}
             </div>
-            <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
-            {/* Quarterly sparkline */}
             {(()=>{
-              const qa=row.qActuals||{};
-              const hasAny=["Q1","Q2","Q3","Q4"].some(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
-              if(!hasAny) return null;
-              const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
-              return (
-                <div style={{marginTop:14,padding:"10px 12px",background:C.surface,borderRadius:10}}>
-                  <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8,fontWeight:700}}>Quarterly Progress · % based on {latestQ}</div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-                    {["Q1","Q2","Q3","Q4"].map(q=>{
-                      const v=qa[q]; const hasV=v!==""&&v!==null&&v!==undefined;
-                      const pct=hasV?computePct(row,v):null;
-                      const col=pct!==null?sc(pct):C.muted;
-                      const isLatest=q===latestQ;
-                      return (
-                        <div key={q} style={{textAlign:"center"}}>
-                          <div style={{fontSize:9,color:isLatest?C.accent:C.muted,fontWeight:700,marginBottom:3}}>{q}{isLatest?" ★":""}</div>
-                          {hasV?(<>
-                            <div style={{fontSize:14,fontWeight:800,color:col}}>{pct}%</div>
-                            <div style={{fontSize:10,color:C.muted}}>{Number(v).toLocaleString()}</div>
-                            <div style={{height:4,background:C.border,borderRadius:99,marginTop:4,overflow:"hidden"}}>
-                              <div style={{height:"100%",width:`${pct}%`,background:col,borderRadius:99}}/>
-                            </div>
-                          </>):<div style={{fontSize:12,color:C.border}}>—</div>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
+              const ratio=timeElapsedRatio(row.targetDate);
+              if(!ratio||ratio<=0) return null;
+              const expected=+(ratio*100).toFixed(1);
+              const s=row.status||"off-track";
+              return <div style={{marginTop:8,padding:"6px 10px",background:C.surface,borderRadius:8,fontSize:10,color:C.muted,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                <span>⏱ {(ratio*100).toFixed(0)}% of period elapsed · Expected {expected}% done by now</span>
+                <span style={{color:s==="on-track"?C.green:s==="at-risk"?C.amber:C.red,fontWeight:700,marginLeft:"auto"}}>{s==="on-track"?"Ahead of schedule":s==="at-risk"?"Behind expected pace":"Significantly behind pace"}</span>
+              </div>;
             })()}
+            <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
+            {/* Quarterly Target vs Actual Trend Chart */}
+            <QTrendChart row={row} readOnly={true}/>
           </div>
         )}
         <div style={{padding:"16px 20px"}}>
@@ -985,38 +1180,11 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
                 <input type="number" value={form.target} onChange={set("target")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/>
               </div>
 
-              {/* Quarterly Actuals */}
+              {/* Live trend chart — updates as you type quarterly actuals */}
               <div style={{marginBottom:11}}>
-                {lbl("Quarterly Actuals")}
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-                  {["Q1","Q2","Q3","Q4"].map(q=>{
-                    const qv=(form.qActuals||{})[q];
-                    const hasV=qv!==""&&qv!==null&&qv!==undefined;
-                    const qpct=hasV?computePct({target:form.target,formulaType:form.formulaType},qv):null;
-                    const col=qpct!==null?sc(qpct):C.muted;
-                    const latestQ=["Q4","Q3","Q2","Q1"].find(q2=>{const v2=(form.qActuals||{})[q2];return v2!==""&&v2!==null&&v2!==undefined;});
-                    const isLatest=q===latestQ;
-                    return (
-                      <div key={q} style={{background:C.surface,borderRadius:9,padding:"8px 10px",border:`1.5px solid ${isLatest?C.accent+"66":hasV?col+"44":C.border}`}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                          <span style={{fontSize:10,fontWeight:800,color:isLatest?C.accent:hasV?col:C.muted}}>{q}</span>
-                          {isLatest&&<span style={{fontSize:8,padding:"1px 4px",borderRadius:99,background:`${C.accent}22`,color:C.accent,fontWeight:700}}>latest</span>}
-                          {hasV&&!isLatest&&<span style={{fontSize:10,fontWeight:700,color:col}}>{qpct}%</span>}
-                        </div>
-                        {isLatest&&hasV&&<div style={{fontSize:11,fontWeight:800,color:col,marginBottom:4}}>{qpct}%</div>}
-                        <input
-                          type="number"
-                          value={hasV?qv:""}
-                          onChange={e=>setForm(p=>({...p,qActuals:{...(p.qActuals||{}),  [q]:e.target.value===""?"":+e.target.value}}))}
-                          placeholder="—"
-                          style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 7px",color:C.text,fontSize:12,outline:"none",boxSizing:"border-box"}}
-                          onFocus={e=>e.target.style.borderColor=C.accent}
-                          onBlur={e=>e.target.style.borderColor=C.border}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
+                {lbl("Quarterly Actuals vs Target")}
+                <QTrendChart row={{...row,...form,qActuals:form.qActuals||{}}} readOnly={false}
+                  onQChange={(q,val)=>setForm(p=>({...p,qActuals:{...(p.qActuals||{}),[q]:val===""?"":+val}}))}/>
               </div>
 
               {/* Actual — read-only, auto-populated from latest quarter */}
@@ -1550,8 +1718,8 @@ function DeptTrendModal({ dept, onClose }) {
                           <div style={{fontSize:11,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kr.keyResult}</div>
                           <div style={{fontSize:9,color:C.muted,marginTop:1}}>Target: {Number(kr.target).toLocaleString()} {latestQ&&`· Latest: ${latestQ}`}</div>
                         </div>
-                        <div style={{fontSize:13,fontWeight:800,color:sc(kr.pct),flexShrink:0}}>{kr.pct}%</div>
-                        <Badge score={kr.pct} small/>
+                        <div style={{fontSize:13,fontWeight:800,color:sc(kr.status||kr.pct),flexShrink:0}}>{kr.pct}%</div>
+                        <Badge score={kr.pct} status={kr.status} small/>
                       </div>
                     );
                   })}
@@ -1820,7 +1988,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     const deptMap = {};
     yRows.forEach(r=>{ const d=r.department; if(!deptMap[d])deptMap[d]={w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; deptMap[d].w+=r.weight; deptMap[d].s+=r.scoreEquivalent; });
     const depts = Object.entries(deptMap).map(([name,d])=>({name,chief:d.chief,pct:d.w>0?(d.s/d.w)*100:0})).sort((a,b)=>b.pct-a.pct);
-    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>r.pct>=80).length, atRisk:yRows.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:yRows.filter(r=>r.pct<60).length };
+    return { year:y, pct, krs:yRows.length, depts, onTrack:yRows.filter(r=>(r.status||"off-track")==="on-track").length, atRisk:yRows.filter(r=>(r.status||"off-track")==="at-risk").length, offTrack:yRows.filter(r=>(r.status||"off-track")==="off-track").length };
   }), [yearStore, years]);
 
   const allDepts = useMemo(()=>[...new Set(rows.map(r=>r.department))].sort(),[rows]);
@@ -1829,13 +1997,13 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const deptStats = useMemo(()=>{
     const map={};
     rows.forEach(r=>{ if(!map[r.department]) map[r.department]={krs:[],w:0,s:0,chief:r.chiefGroup||getChief(r.department)}; map[r.department].krs.push(r); map[r.department].w+=r.weight; map[r.department].s+=r.scoreEquivalent; });
-    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    return Object.entries(map).map(([name,d])=>({ name,krs:d.krs,weight:d.w,score:d.s,chief:d.chief||"Other",pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>(k.status||"off-track")==="on-track").length,atRisk:d.krs.filter(k=>(k.status||"off-track")==="at-risk").length,offTrack:d.krs.filter(k=>(k.status||"off-track")==="off-track").length })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   const chiefStats = useMemo(()=>{
     const map={};
     rows.forEach(r=>{ const chief=r.chiefGroup||getChief(r.department); if(!map[chief]) map[chief]={depts:new Set(),krs:[],w:0,s:0}; map[chief].depts.add(r.department); map[chief].krs.push(r); map[chief].w+=r.weight; map[chief].s+=r.scoreEquivalent; });
-    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>k.pct>=80).length,atRisk:d.krs.filter(k=>k.pct>=60&&k.pct<80).length,offTrack:d.krs.filter(k=>k.pct<60).length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
+    return Object.entries(map).map(([name,d])=>({ name,depts:[...d.depts],krs:d.krs,weight:d.w,score:d.s,pct:d.w>0?(d.s/d.w)*100:0,onTrack:d.krs.filter(k=>(k.status||"off-track")==="on-track").length,atRisk:d.krs.filter(k=>(k.status||"off-track")==="at-risk").length,offTrack:d.krs.filter(k=>(k.status||"off-track")==="off-track").length,color:CHIEF_COLORS[name]||C.muted })).sort((a,b)=>b.pct-a.pct);
   },[rows]);
 
   // Only scored rows (with actual provided) count toward totals
@@ -1849,9 +2017,9 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const visibleRows=useMemo(()=>{
     let base = rows;
     if(filterType!=="ALL"){ if(CHIEF_NAMES.includes(filterType)){ if(selDept) base=rows.filter(r=>r.department===selDept); else base=rows.filter(r=>(r.chiefGroup||getChief(r.department))===filterType); } }
-    if(statusFilter==="on-track") base=base.filter(r=>r.pct>=80);
-    else if(statusFilter==="at-risk") base=base.filter(r=>r.pct>=60&&r.pct<80);
-    else if(statusFilter==="off-track") base=base.filter(r=>r.pct<60);
+    if(statusFilter==="on-track") base=base.filter(r=>(r.status||"off-track")==="on-track");
+    else if(statusFilter==="at-risk") base=base.filter(r=>(r.status||"off-track")==="at-risk");
+    else if(statusFilter==="off-track") base=base.filter(r=>(r.status||"off-track")==="off-track");
     return base;
   },[rows,filterType,selDept,statusFilter]);
 
@@ -1922,23 +2090,23 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const [showPDFModal, setShowPDFModal] = useState(false);
 
   const buildAndDownloadPDF = useCallback((selections) => {
-    const sc2  = p => p>=80?"#16a34a":p>=60?"#d97706":"#dc2626";
-    const slbl = p => p>=80?"On Track":p>=60?"At Risk":"Off Track";
-    const sbg  = p => p>=80?"#f0fdf4":p>=60?"#fffbeb":"#fef2f2";
+    const sc2  = s => { if(typeof s==="string") return s==="on-track"?"#16a34a":s==="at-risk"?"#d97706":"#dc2626"; return s>=80?"#16a34a":s>=60?"#d97706":"#dc2626"; };
+    const slbl = s => { if(typeof s==="string") return s==="on-track"?"On Track":s==="at-risk"?"At Risk":"Off Track"; return s>=80?"On Track":s>=60?"At Risk":"Off Track"; };
+    const sbg  = s => { if(typeof s==="string") return s==="on-track"?"#f0fdf4":s==="at-risk"?"#fffbeb":"#fef2f2"; return s>=80?"#f0fdf4":s>=60?"#fffbeb":"#fef2f2"; };
     const esc  = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
     const totW2 = rows.reduce((s,r)=>s+r.weight,0);
     const totS2 = rows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const ovPct2 = totW2>0?(totS2/totW2)*100:0;
 
-    // Dept stats — mirrors deptStats useMemo
+    // Dept stats — mirrors deptStats useMemo, using row.status for on/at/off track
     const deptMap2 = {};
     rows.forEach(r=>{ const d=r.department; if(!deptMap2[d]) deptMap2[d]={chief:r.chiefGroup||getChief(r.department),w:0,s:0,krs:[]}; deptMap2[d].w+=r.weight; deptMap2[d].s+=r.scoreEquivalent; deptMap2[d].krs.push(r); });
-    const deptList2 = Object.entries(deptMap2).map(([name,d])=>({ name, chief:d.chief, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    const deptList2 = Object.entries(deptMap2).map(([name,d])=>({ name, chief:d.chief, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>(r.status||"off-track")==="on-track").length, atRisk:d.krs.filter(r=>(r.status||"off-track")==="at-risk").length, offTrack:d.krs.filter(r=>(r.status||"off-track")==="off-track").length })).sort((a,b)=>b.pct-a.pct);
 
-    // Chief stats — mirrors chiefStats useMemo
+    // Chief stats — mirrors chiefStats useMemo, using row.status
     const chiefMap2 = {};
     rows.forEach(r=>{ const c=r.chiefGroup||getChief(r.department); if(!chiefMap2[c]) chiefMap2[c]={depts:new Set(),w:0,s:0,krs:[]}; chiefMap2[c].depts.add(r.department); chiefMap2[c].w+=r.weight; chiefMap2[c].s+=r.scoreEquivalent; chiefMap2[c].krs.push(r); });
-    const chiefList2 = Object.entries(chiefMap2).map(([name,d])=>({ name, depts:d.depts.size, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+    const chiefList2 = Object.entries(chiefMap2).map(([name,d])=>({ name, depts:d.depts.size, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>(r.status||"off-track")==="on-track").length, atRisk:d.krs.filter(r=>(r.status||"off-track")==="at-risk").length, offTrack:d.krs.filter(r=>(r.status||"off-track")==="off-track").length })).sort((a,b)=>b.pct-a.pct);
 
     const bar = (pct,w=120) => { const fill=sc2(pct), p=Math.min(Math.max(pct,0),100); return `<div style="display:flex;align-items:center;gap:6px"><div style="width:${w}px;height:7px;background:#e5e7eb;border-radius:99px;overflow:hidden"><div style="width:${p}%;height:100%;background:${fill};border-radius:99px"></div></div><span style="font-size:10px;color:${fill};font-weight:700">${pct.toFixed(1)}%</span></div>`; };
 
@@ -2081,9 +2249,9 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         <div class="section-sub">Combined performance across all chief groups and departments · FY ${activeYear}</div>
         <div class="kpi-row">
           <div class="kpi-card" style="color:${sc2(ovPct2)}"><div class="kpi-label">Overall Score</div><div class="kpi-value" style="color:${sc2(ovPct2)}">${ovPct2.toFixed(1)}%</div></div>
-          <div class="kpi-card" style="color:#16a34a"><div class="kpi-label">On Track</div><div class="kpi-value" style="color:#16a34a">${rows.filter(r=>r.pct>=80).length}</div></div>
-          <div class="kpi-card" style="color:#d97706"><div class="kpi-label">At Risk</div><div class="kpi-value" style="color:#d97706">${rows.filter(r=>r.pct>=60&&r.pct<80).length}</div></div>
-          <div class="kpi-card" style="color:#dc2626"><div class="kpi-label">Off Track</div><div class="kpi-value" style="color:#dc2626">${rows.filter(r=>r.pct<60).length}</div></div>
+          <div class="kpi-card" style="color:#16a34a"><div class="kpi-label">On Track</div><div class="kpi-value" style="color:#16a34a">${rows.filter(r=>(r.status||"off-track")==="on-track").length}</div></div>
+          <div class="kpi-card" style="color:#d97706"><div class="kpi-label">At Risk</div><div class="kpi-value" style="color:#d97706">${rows.filter(r=>(r.status||"off-track")==="at-risk").length}</div></div>
+          <div class="kpi-card" style="color:#dc2626"><div class="kpi-label">Off Track</div><div class="kpi-value" style="color:#dc2626">${rows.filter(r=>(r.status||"off-track")==="off-track").length}</div></div>
           <div class="kpi-card" style="color:#1e40af"><div class="kpi-label">Total KRs</div><div class="kpi-value" style="color:#1e40af">${rows.length}</div></div>
           <div class="kpi-card" style="color:#7c3aed"><div class="kpi-label">Departments</div><div class="kpi-value" style="color:#7c3aed">${deptList2.length}</div></div>
         </div>
@@ -2128,7 +2296,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
         const qCells=QUARTERS.map(q=>{const v=qa[q];const hasV=v!==""&&v!==null&&v!==undefined;const isLatest=q===latestQ;const latestStyle=isLatest?"font-weight:800;color:"+sc2(r.pct)+";background:#eff6ff":"";return "<td style='text-align:center;"+latestStyle+"'>"+(hasV?Number(v).toLocaleString():"—")+"</td>";}).join("");
         const actualDisplay=r.actual!==""&&r.actual!==null&&r.actual!==undefined?Number(r.actual).toLocaleString():"—";
-        return `<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:180px">${esc(r.keyResult)}</td><td style="color:#64748b;text-align:center">${Number(r.target).toLocaleString()}</td>${qCells}<td style="font-weight:700;text-align:center">${actualDisplay}${latestQ?`<span style="font-size:8px;color:#94a3b8;display:block">${latestQ}</span>`:""}</td><td style="color:#64748b;font-size:9px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.pct)};font-weight:800;text-align:center">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`;
+        return `<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:180px">${esc(r.keyResult)}</td><td style="color:#64748b;text-align:center">${Number(r.target).toLocaleString()}</td>${qCells}<td style="font-weight:700;text-align:center">${actualDisplay}${latestQ?`<span style="font-size:8px;color:#94a3b8;display:block">${latestQ}</span>`:""}</td><td style="color:#64748b;font-size:9px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.status||r.pct)};font-weight:800;text-align:center">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.status||r.pct)};color:${sc2(r.status||r.pct)}">${slbl(r.status||r.pct)}</span></td></tr>`;
       }).join("")}</tbody></table>
     </div>`;
 
@@ -2388,7 +2556,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                   <div style={{marginTop:10,fontSize:12,color:C.muted}}>{rows.length===0?"No KRs yet — import or add your first KR in the KR Tracker.":<>Score <b style={{color:C.text}}>{totS.toFixed(1)}</b>/{totW} pts · {allDepts.length} Depts · {rows.length} KRs</>}</div>
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                  {[["On Track",rows.filter(r=>r.pct>=80).length,"KRs",C.green,"✓","on-track"],["At Risk",rows.filter(r=>r.pct>=60&&r.pct<80).length,"KRs",C.amber,"⚠","at-risk"],["Off Track",rows.filter(r=>r.pct<60).length,"KRs",C.red,"✕","off-track"],["Depts",allDepts.length,"Tracked",C.accent,"◈",null]].map(([l,v,s,col,ic,sf])=>(
+                  {[["On Track",rows.filter(r=>(r.status||"off-track")==="on-track").length,"KRs",C.green,"✓","on-track"],["At Risk",rows.filter(r=>(r.status||"off-track")==="at-risk").length,"KRs",C.amber,"⚠","at-risk"],["Off Track",rows.filter(r=>(r.status||"off-track")==="off-track").length,"KRs",C.red,"✕","off-track"],["Depts",allDepts.length,"Tracked",C.accent,"◈",null]].map(([l,v,s,col,ic,sf])=>(
                     <div key={l} onClick={()=>{ if(sf){ setFilterType("ALL"); setSelDept(null); setStatusFilter(sf); setView("tracker"); } }}
                       style={{background:C.card,border:`1px solid ${sf?"transparent":C.border}`,borderRadius:13,padding:"14px 16px",position:"relative",overflow:"hidden",cursor:sf?"pointer":"default",outline:sf?`1px solid ${col}44`:"none",transition:"transform .15s, box-shadow .15s"}}
                       onMouseEnter={e=>{ if(sf){e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow=`0 8px 24px ${col}33`;}}}
@@ -2714,7 +2882,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <div><div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5}}>{filterType==="ALL"?"Overall":selDept?selDept:filterType}</div><div style={{fontSize:26,fontWeight:800,fontFamily:"'Bebas Neue'",color:visibleRows.length?sc(visPct):C.muted,letterSpacing:1}}>{visibleRows.length?visPct.toFixed(1)+"%":"—"}</div></div>
                 <div style={{flex:1,minWidth:100}}><Bar pct={visPct} color={sc(visPct)} h={10}/></div>
                 <div style={{display:"flex",gap:14}}>
-                  {[["✓",visibleRows.filter(r=>r.pct>=80).length,C.green],["⚠",visibleRows.filter(r=>r.pct>=60&&r.pct<80).length,C.amber],["✕",visibleRows.filter(r=>r.pct<60).length,C.red]].map(([ic,n,col])=>(
+                  {[["✓",visibleRows.filter(r=>(r.status||"off-track")==="on-track").length,C.green],["⚠",visibleRows.filter(r=>(r.status||"off-track")==="at-risk").length,C.amber],["✕",visibleRows.filter(r=>(r.status||"off-track")==="off-track").length,C.red]].map(([ic,n,col])=>(
                     <div key={ic} style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue'"}}>{n}</div><div style={{fontSize:10,color:C.muted}}>{ic}</div></div>
                   ))}
                 </div>
@@ -2787,10 +2955,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                                   <td style={{padding:"0 10px",verticalAlign:"middle"}}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"":Number(row.actual).toLocaleString()}</span></td>
                                   <td style={{padding:"0 6px",verticalAlign:"middle"}}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
                                   <td style={{padding:"0 8px",verticalAlign:"middle"}}>
-                                    <span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span>
+                                    <span style={{fontSize:13,fontWeight:800,color:sc(row.status||row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span>
                                     {latestQ&&<div style={{fontSize:9,color:C.muted,marginTop:1}}>{latestQ}</div>}
                                   </td>
-                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><Badge score={row.pct} small/></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><Badge score={row.pct} status={row.status} small/></td>
                                 </tr>
                               </React.Fragment>
                             );
