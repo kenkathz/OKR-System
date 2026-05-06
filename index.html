@@ -220,6 +220,22 @@ const uid = () => ++_uid;
 // Combo modes:
 //   exact+higher — 100% if Actual >= Target (meeting or exceeding is full score)
 //   exact+lower  — 100% if Actual <= Target (meeting or going below is full score)
+// Compute % done for a given actual value against a row's target/formula
+const computePct = (row, actualVal) => {
+  const hasA = actualVal !== "" && actualVal !== null && actualVal !== undefined;
+  if (!hasA) return 0;
+  const t = Number(row.target), a = Number(actualVal);
+  if (t === 0) return a === 0 ? 100 : 0;
+  const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
+  let pct;
+  if (ft === "exact+higher" || ft === "higher+exact") pct = a >= t ? 100 : Math.max((a/t)*100, 0);
+  else if (ft === "exact+lower" || ft === "lower+exact") pct = a <= t ? 100 : Math.min((t/(a||0.0001))*100, 100);
+  else if (ft === "exact") pct = a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
+  else if (ft === "lower") pct = Math.min((t/(a||0.0001))*100, 100);
+  else pct = Math.min((a/t)*100, 100);
+  return +Math.max(0, Math.min(100, pct)).toFixed(1);
+};
+
 const compute = row => {
   const actualRaw = row.actual;
   const hasActual = actualRaw !== "" && actualRaw !== null && actualRaw !== undefined;
@@ -235,19 +251,19 @@ const compute = row => {
   }
   const ft = (row.formulaType || "higher").toLowerCase().replace(/[,\s]+/g, "+");
   let pct;
-  if (ft === "exact+higher" || ft === "higher+exact") {
-    pct = a >= t ? 100 : Math.max((a / t) * 100, 0);
-  } else if (ft === "exact+lower" || ft === "lower+exact") {
-    pct = a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
-  } else if (ft === "exact") {
-    pct = a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
-  } else if (ft === "lower") {
-    pct = Math.min((t / (a || 0.0001)) * 100, 100);
-  } else {
-    // higher (default)
-    pct = Math.min((a / t) * 100, 100);
-  }
+  if (ft === "exact+higher" || ft === "higher+exact") pct = a >= t ? 100 : Math.max((a / t) * 100, 0);
+  else if (ft === "exact+lower" || ft === "lower+exact") pct = a <= t ? 100 : Math.min((t / (a || 0.0001)) * 100, 100);
+  else if (ft === "exact") pct = a === t ? 100 : a > t ? Math.min((a/t)*100,100) : (a/t)*100;
+  else if (ft === "lower") pct = Math.min((t / (a || 0.0001)) * 100, 100);
+  else pct = Math.min((a / t) * 100, 100);
   pct = Math.max(0, Math.min(100, pct));
+  // Override pct with latest recorded quarterly actual if available
+  const qa = row.qActuals || {};
+  const quarters = ["Q4","Q3","Q2","Q1"];
+  const latestQ = quarters.find(q => qa[q] !== "" && qa[q] !== null && qa[q] !== undefined);
+  if (latestQ) {
+    pct = computePct(row, qa[latestQ]);
+  }
   return { ...row, pct:+pct.toFixed(1), scoreEquivalent:+((pct/100)*Number(row.weight)).toFixed(2) };
 };
 
@@ -848,9 +864,11 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
     chiefGroup: row.chiefGroup||"", department: row.department, _deptMode: "list",
     keyResult: row.keyResult, weight: row.weight, targetDate: row.targetDate||"",
     target: row.target, actual: row.actual, formulaType: row.formulaType||"higher",
+    qActuals: row.qActuals || {Q1:"",Q2:"",Q3:"",Q4:""},
   });
   const [confirmDel, setConfirmDel] = useState(false);
   const set = k => e => setForm(p=>({...p,[k]:e.target.value}));
+  const setQActual = (q, val) => setForm(p=>({...p, qActuals:{...p.qActuals,[q]:val}}));
   const valid = form.department && form.keyResult && form.weight && form.target !== "";
   const ist = {width:"100%",background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"};
   const lbl = t => <label style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,display:"block",marginBottom:4}}>{t}</label>;
@@ -898,7 +916,7 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               ].map(([l,v,col])=>(
                 <div key={l} style={{background:C.surface,borderRadius:9,padding:"10px 12px"}}>
                   <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.2,marginBottom:4}}>{l}</div>
-                  <div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue',sans-serif"}}>{v}</div>
+                  <div style={{fontSize:18,fontWeight:800,color:col,fontFamily:"'Bebas Neue',sans-serif"}}>{v||"—"}</div>
                 </div>
               ))}
             </div>
@@ -908,6 +926,38 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               {row.targetDate&&<span style={{fontSize:11,color:C.muted}}>📅 {row.targetDate}</span>}
             </div>
             <div style={{marginTop:8,fontSize:10,color:ftCol,padding:"3px 8px",background:`${ftCol}0d`,borderRadius:6,display:"inline-block",fontFamily:"monospace"}}>{FORMULA_HINTS[ft]||""}</div>
+            {/* Quarterly sparkline */}
+            {(()=>{
+              const qa=row.qActuals||{};
+              const hasAny=["Q1","Q2","Q3","Q4"].some(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+              if(!hasAny) return null;
+              const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+              return (
+                <div style={{marginTop:14,padding:"10px 12px",background:C.surface,borderRadius:10}}>
+                  <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,marginBottom:8,fontWeight:700}}>Quarterly Progress · % based on {latestQ}</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                    {["Q1","Q2","Q3","Q4"].map(q=>{
+                      const v=qa[q]; const hasV=v!==""&&v!==null&&v!==undefined;
+                      const pct=hasV?computePct(row,v):null;
+                      const col=pct!==null?sc(pct):C.muted;
+                      const isLatest=q===latestQ;
+                      return (
+                        <div key={q} style={{textAlign:"center"}}>
+                          <div style={{fontSize:9,color:isLatest?C.accent:C.muted,fontWeight:700,marginBottom:3}}>{q}{isLatest?" ★":""}</div>
+                          {hasV?(<>
+                            <div style={{fontSize:14,fontWeight:800,color:col}}>{pct}%</div>
+                            <div style={{fontSize:10,color:C.muted}}>{Number(v).toLocaleString()}</div>
+                            <div style={{height:4,background:C.border,borderRadius:99,marginTop:4,overflow:"hidden"}}>
+                              <div style={{height:"100%",width:`${pct}%`,background:col,borderRadius:99}}/>
+                            </div>
+                          </>):<div style={{fontSize:12,color:C.border}}>—</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
         <div style={{padding:"16px 20px"}}>
@@ -930,10 +980,61 @@ const KRDetailModal = ({row, onClose, onSave, onDelete, readOnly=false}) => {
               </div>
               <div style={{marginBottom:11}}>{lbl("Key Result")}<input value={form.keyResult} onChange={set("keyResult")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
               <div style={{marginBottom:11}}>{lbl("Target Date")}<input value={form.targetDate} onChange={set("targetDate")} placeholder="Dec 31 2026" style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:11}}>
-                <div>{lbl("Target")}<input type="number" value={form.target} onChange={set("target")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/></div>
-                <div>{lbl("Actual (optional)")}<input type="number" value={form.actual} onChange={set("actual")} placeholder="Leave blank if not yet provided" style={{...ist,borderColor:C.green}} onFocus={e=>e.target.style.borderColor=C.green} onBlur={e=>e.target.style.borderColor=C.green}/></div>
+              <div style={{marginBottom:11}}>
+                {lbl("Target")}
+                <input type="number" value={form.target} onChange={set("target")} style={ist} onFocus={e=>e.target.style.borderColor=C.accent} onBlur={e=>e.target.style.borderColor=C.border}/>
               </div>
+
+              {/* Quarterly Actuals */}
+              <div style={{marginBottom:11}}>
+                {lbl("Quarterly Actuals")}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                  {["Q1","Q2","Q3","Q4"].map(q=>{
+                    const qv=(form.qActuals||{})[q];
+                    const hasV=qv!==""&&qv!==null&&qv!==undefined;
+                    const qpct=hasV?computePct({target:form.target,formulaType:form.formulaType},qv):null;
+                    const col=qpct!==null?sc(qpct):C.muted;
+                    const latestQ=["Q4","Q3","Q2","Q1"].find(q2=>{const v2=(form.qActuals||{})[q2];return v2!==""&&v2!==null&&v2!==undefined;});
+                    const isLatest=q===latestQ;
+                    return (
+                      <div key={q} style={{background:C.surface,borderRadius:9,padding:"8px 10px",border:`1.5px solid ${isLatest?C.accent+"66":hasV?col+"44":C.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                          <span style={{fontSize:10,fontWeight:800,color:isLatest?C.accent:hasV?col:C.muted}}>{q}</span>
+                          {isLatest&&<span style={{fontSize:8,padding:"1px 4px",borderRadius:99,background:`${C.accent}22`,color:C.accent,fontWeight:700}}>latest</span>}
+                          {hasV&&!isLatest&&<span style={{fontSize:10,fontWeight:700,color:col}}>{qpct}%</span>}
+                        </div>
+                        {isLatest&&hasV&&<div style={{fontSize:11,fontWeight:800,color:col,marginBottom:4}}>{qpct}%</div>}
+                        <input
+                          type="number"
+                          value={hasV?qv:""}
+                          onChange={e=>setForm(p=>({...p,qActuals:{...(p.qActuals||{}),  [q]:e.target.value===""?"":+e.target.value}}))}
+                          placeholder="—"
+                          style={{width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 7px",color:C.text,fontSize:12,outline:"none",boxSizing:"border-box"}}
+                          onFocus={e=>e.target.style.borderColor=C.accent}
+                          onBlur={e=>e.target.style.borderColor=C.border}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Actual — read-only, auto-populated from latest quarter */}
+              <div style={{marginBottom:11}}>
+                {lbl("Actual (auto-populated from latest quarter)")}
+                {(()=>{
+                  const latestQ=["Q4","Q3","Q2","Q1"].find(q=>{const v=(form.qActuals||{})[q];return v!==""&&v!==null&&v!==undefined;});
+                  const autoVal=latestQ?(form.qActuals||{})[latestQ]:"";
+                  const displayVal=autoVal!==""?Number(autoVal).toLocaleString():"";
+                  return (
+                    <div style={{...ist,background:`${C.surface}`,color:displayVal?C.text:C.muted,userSelect:"none",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"default"}}>
+                      <span>{displayVal||"Will populate from latest quarter"}</span>
+                      {latestQ&&<span style={{fontSize:10,padding:"2px 7px",borderRadius:99,background:`${C.accent}18`,color:C.accent,border:`1px solid ${C.accent}33`,fontWeight:700}}>{latestQ}</span>}
+                    </div>
+                  );
+                })()}
+              </div>
+
               <div style={{marginBottom:16}}>
                 {lbl("Formula Type — How is performance measured?")}
                 <FormulaSelector value={form.formulaType} onChange={ft=>setForm(p=>({...p,formulaType:ft}))} ist={ist}/>
@@ -1318,6 +1419,152 @@ function PDFExportModal({ onClose, onExport, activeYear, rows, issues }) {
   );
 }
 
+// ─── DEPT TREND MODAL ─────────────────────────────────────────────────────────
+function DeptTrendModal({ dept, onClose }) {
+  const QUARTERS = ["Q1","Q2","Q3","Q4"];
+  const Q_COLS = ["#60a5fa","#34d399","#fbbf24","#f87171"];
+  const { name, chief, pct, qPcts, krs } = dept;
+  const cc = CHIEF_COLORS[chief] || C.muted;
+  const hasQ = qPcts.some(p => p !== null);
+  const maxPct = Math.max(100, ...qPcts.filter(p => p !== null));
+
+  // Build SVG line chart points
+  const chartW = 440, chartH = 160, padL = 36, padR = 16, padT = 16, padB = 28;
+  const innerW = chartW - padL - padR;
+  const innerH = chartH - padT - padB;
+  const filledQs = QUARTERS.map((q,i) => ({ q, i, p: qPcts[i] })).filter(d => d.p !== null);
+  const xOf = i => padL + (i / 3) * innerW;
+  const yOf = p => padT + innerH - (p / 100) * innerH;
+  const linePoints = filledQs.map(d => `${xOf(d.i)},${yOf(d.p)}`).join(" ");
+  const areaPoints = filledQs.length > 0
+    ? `${xOf(filledQs[0].i)},${padT+innerH} ${linePoints} ${xOf(filledQs[filledQs.length-1].i)},${padT+innerH}`
+    : "";
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"#000d",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.card,border:`1px solid ${C.accent}44`,borderRadius:20,width:"min(540px,96vw)",maxHeight:"90vh",overflowY:"auto",boxShadow:`0 24px 60px #0008`}}>
+
+        {/* Header */}
+        <div style={{padding:"18px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+              <span style={{fontSize:10,padding:"2px 8px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700}}>{chief}</span>
+              <span style={{fontSize:11,color:C.muted}}>{(krs||[]).length} KRs</span>
+            </div>
+            <div style={{fontSize:16,fontWeight:800,color:C.text}}>{name}</div>
+            <div style={{fontSize:12,color:C.muted,marginTop:2}}>Quarterly Progress · FY</div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:22,fontWeight:900,color:sc(pct)}}>{pct.toFixed(1)}%</div>
+              <Badge score={pct}/>
+            </div>
+            <button onClick={onClose} style={{background:"none",border:`1px solid ${C.border}`,color:C.muted,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:14}}>✕</button>
+          </div>
+        </div>
+
+        <div style={{padding:"20px"}}>
+          {!hasQ ? (
+            <div style={{textAlign:"center",padding:"32px 0",color:C.muted,fontSize:13}}>
+              No quarterly actuals recorded yet for this department.<br/>
+              <span style={{fontSize:11}}>Expand KR rows in the KR Tracker to add Q1–Q4 actuals.</span>
+            </div>
+          ) : (
+            <>
+              {/* SVG line chart */}
+              <div style={{background:C.surface,borderRadius:14,padding:"16px",marginBottom:16,overflowX:"auto"}}>
+                <svg viewBox={`0 0 ${chartW} ${chartH}`} style={{width:"100%",maxWidth:chartW,display:"block"}}>
+                  {/* Grid lines */}
+                  {[0,25,50,75,100].map(y=>(
+                    <g key={y}>
+                      <line x1={padL} y1={yOf(y)} x2={chartW-padR} y2={yOf(y)} stroke={C.border} strokeWidth="1" opacity="0.5"/>
+                      <text x={padL-6} y={yOf(y)+4} textAnchor="end" fontSize="9" fill={C.muted}>{y}%</text>
+                    </g>
+                  ))}
+                  {/* Q labels */}
+                  {QUARTERS.map((q,i)=>(
+                    <text key={q} x={xOf(i)} y={chartH-6} textAnchor="middle" fontSize="10" fontWeight="700"
+                      fill={qPcts[i]!==null?Q_COLS[i]:C.border}>{q}</text>
+                  ))}
+                  {/* Area fill */}
+                  {areaPoints && (
+                    <polygon points={areaPoints} fill={C.accent} opacity="0.08"/>
+                  )}
+                  {/* Line */}
+                  {filledQs.length > 1 && (
+                    <polyline points={linePoints} fill="none" stroke={C.accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                  )}
+                  {/* Dots + labels */}
+                  {filledQs.map(({i, p})=>{
+                    const col = sc(p);
+                    return (
+                      <g key={i}>
+                        <circle cx={xOf(i)} cy={yOf(p)} r="5" fill={Q_COLS[i]} stroke={C.card} strokeWidth="2"/>
+                        <text x={xOf(i)} y={yOf(p)-10} textAnchor="middle" fontSize="10" fontWeight="800" fill={col}>{p}%</text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+
+              {/* Quarter cards */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
+                {QUARTERS.map((q,qi)=>{
+                  const p = qPcts[qi];
+                  const col = p!==null ? sc(p) : C.muted;
+                  const qCol = Q_COLS[qi];
+                  const prev = qi>0 ? qPcts.slice(0,qi).reverse().find(x=>x!==null) : null;
+                  const trend = p!==null&&prev!==null ? (p>prev?"↑":p<prev?"↓":"→") : null;
+                  const tCol = trend==="↑"?C.green:trend==="↓"?C.red:C.muted;
+                  return (
+                    <div key={q} style={{background:p!==null?`${qCol}10`:C.surface,borderRadius:10,padding:"10px 12px",border:`1.5px solid ${p!==null?qCol+"55":C.border}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                        <span style={{fontSize:10,fontWeight:800,color:p!==null?qCol:C.muted}}>{q}</span>
+                        {trend&&<span style={{fontSize:12,color:tCol,fontWeight:800}}>{trend}</span>}
+                      </div>
+                      {p!==null?(
+                        <>
+                          <div style={{fontSize:18,fontWeight:900,color:col,lineHeight:1}}>{p}%</div>
+                          <div style={{height:4,background:C.border,borderRadius:99,marginTop:6,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:`${p}%`,background:qCol,borderRadius:99}}/>
+                          </div>
+                        </>
+                      ):(
+                        <div style={{fontSize:13,color:C.border,marginTop:4}}>—</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* KR breakdown */}
+              <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1.5,fontWeight:700,marginBottom:10}}>KR Breakdown</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {(krs||[]).map(kr=>{
+                    const qa=kr.qActuals||{};
+                    const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+                    return (
+                      <div key={kr.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.surface,borderRadius:8}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:11,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kr.keyResult}</div>
+                          <div style={{fontSize:9,color:C.muted,marginTop:1}}>Target: {Number(kr.target).toLocaleString()} {latestQ&&`· Latest: ${latestQ}`}</div>
+                        </div>
+                        <div style={{fontSize:13,fontWeight:800,color:sc(kr.pct),flexShrink:0}}>{kr.pct}%</div>
+                        <Badge score={kr.pct} small/>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── AI INSIGHTS CARD ─────────────────────────────────────────────────────────
 function AIInsightsCard({ rows, allDepts, insights, setInsights, loadingAI, loadAI }) {
   const [apiKey,    setApiKeyState] = useState(()=>localStorage.getItem("okr_anthropic_key")||"");
@@ -1517,6 +1764,8 @@ function App({ authUser, users, onUsersChange, onLogout }) {
   const [selDept,      setSelDept]      = useState(null);
   const [statusFilter, setStatusFilter] = useState(null);
   const [selectedIds,  setSelectedIds]  = useState(new Set());
+  const [expandedRows, setExpandedRows] = useState(new Set());
+  const [deptTrendModal, setDeptTrendModal] = useState(null);
   const PAGE_SIZE = 15;
   const [trackerPage,  setTrackerPage]  = useState(1);
   const [rankPage,     setRankPage]     = useState(1);
@@ -1619,13 +1868,16 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
   const handleAdd = form => {
     const actualVal = String(form.actual).trim() === "" ? "" : +form.actual;
-    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher"});
+    const nr = compute({id:uid(),chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher",qActuals:form.qActuals||{Q1:"",Q2:"",Q3:"",Q4:""}});
     setRows(prev => { const next=[...prev,nr]; saveRows(next); return next; });
     setShowAdd(false); toast$("KR added ✓");
   };
   const handleUpdate = (form,editId) => {
-    const actualVal = String(form.actual).trim() === "" ? "" : +form.actual;
-    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher"});
+    const qa = form.qActuals||{Q1:"",Q2:"",Q3:"",Q4:""};
+    // Auto-populate actual from latest recorded quarterly value
+    const latestQ = ["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+    const actualVal = latestQ ? +qa[latestQ] : (String(form.actual).trim()===""?"":+form.actual);
+    const nr = compute({id:editId,chiefGroup:form.chiefGroup,department:form.department,keyResult:form.keyResult,weight:+form.weight,targetDate:form.targetDate,target:+form.target,actual:actualVal,formulaType:form.formulaType||"higher",qActuals:qa});
     setRows(prev => { const next=prev.map(r=>r.id===editId?nr:r); saveRows(next); return next; });
     setDetailRow(null); toast$("KR updated ✓");
   };
@@ -1677,15 +1929,23 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     const totW2 = rows.reduce((s,r)=>s+r.weight,0);
     const totS2 = rows.reduce((s,r)=>s+r.scoreEquivalent,0);
     const ovPct2 = totW2>0?(totS2/totW2)*100:0;
+
+    // Dept stats — mirrors deptStats useMemo
     const deptMap2 = {};
     rows.forEach(r=>{ const d=r.department; if(!deptMap2[d]) deptMap2[d]={chief:r.chiefGroup||getChief(r.department),w:0,s:0,krs:[]}; deptMap2[d].w+=r.weight; deptMap2[d].s+=r.scoreEquivalent; deptMap2[d].krs.push(r); });
     const deptList2 = Object.entries(deptMap2).map(([name,d])=>({ name, chief:d.chief, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+
+    // Chief stats — mirrors chiefStats useMemo
     const chiefMap2 = {};
     rows.forEach(r=>{ const c=r.chiefGroup||getChief(r.department); if(!chiefMap2[c]) chiefMap2[c]={depts:new Set(),w:0,s:0,krs:[]}; chiefMap2[c].depts.add(r.department); chiefMap2[c].w+=r.weight; chiefMap2[c].s+=r.scoreEquivalent; chiefMap2[c].krs.push(r); });
     const chiefList2 = Object.entries(chiefMap2).map(([name,d])=>({ name, depts:d.depts.size, pct:d.w>0?(d.s/d.w)*100:0, krs:d.krs.length, onTrack:d.krs.filter(r=>r.pct>=80).length, atRisk:d.krs.filter(r=>r.pct>=60&&r.pct<80).length, offTrack:d.krs.filter(r=>r.pct<60).length })).sort((a,b)=>b.pct-a.pct);
+
     const bar = (pct,w=120) => { const fill=sc2(pct), p=Math.min(Math.max(pct,0),100); return `<div style="display:flex;align-items:center;gap:6px"><div style="width:${w}px;height:7px;background:#e5e7eb;border-radius:99px;overflow:hidden"><div style="width:${p}%;height:100%;background:${fill};border-radius:99px"></div></div><span style="font-size:10px;color:${fill};font-weight:700">${pct.toFixed(1)}%</span></div>`; };
+
+    // Sort rows: chief → dept → pct desc, same as tracker
     const sortedRows = [...rows].sort((a,b)=>{ const ca=a.chiefGroup||getChief(a.department), cb=b.chiefGroup||getChief(b.department); return ca.localeCompare(cb)||a.department.localeCompare(b.department)||b.pct-a.pct; });
 
+    const QUARTERS = ["Q1","Q2","Q3","Q4"];
     const sectionLabels = selections.map(s=>({dashboard:"Dashboard",tracker:"KR Tracker",quarterly:"Quarterly Submission",issues:"Issues"}[s])).join(", ");
 
     // ── Shared CSS ──
@@ -1708,9 +1968,12 @@ function App({ authUser, users, onUsersChange, onLogout }) {
     .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:9px;font-weight:700;white-space:nowrap}
     .divider{height:1px;background:#e2e8f0;margin:0 32px}
     .print-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #e2e8f0;padding:12px 24px;display:flex;align-items:center;gap:12px;z-index:99}
+    .chief-bar-wrap{margin-bottom:10px}.chief-bar-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;font-size:10px;font-weight:700}
+    .chief-bar-track{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden}
+    .chief-bar-fill{height:100%;border-radius:99px}
     @media print{.print-bar{display:none}@page{margin:1.2cm;size:A4 landscape}}`;
 
-    // ── Cover page ──
+    // ── Cover ──
     const cover = `<div class="cover">
       <div style="font-size:10px;opacity:.5;letter-spacing:3px;margin-bottom:10px;text-transform:uppercase">Chiefs Group · OKR Management System</div>
       <div class="cover-title">OKR Report · FY ${activeYear}</div>
@@ -1721,12 +1984,11 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
     // ── Section: Dashboard ──
     const dashSection = !selections.includes("dashboard") ? "" : (()=>{
-      // Quarterly summary data — mirrors the dashboard widget computation
-      const quarters2 = ["Q1","Q2","Q3","Q4"];
+      // Quarterly submission summary
       const qDepts2 = Object.entries(qStatus).filter(([d]) => isDeptOfficial(d));
       const qTotal2 = qDepts2.length;
       const currentQIdx2 = (()=>{ const m=new Date().getMonth(); if(m<3)return 0; if(m<6)return 1; if(m<9)return 2; return 3; })();
-      const qStats2 = quarters2.map((q,qi) => {
+      const qStats2 = QUARTERS.map((q,qi) => {
         const updated  = qDepts2.filter(([,d]) => d[q]==="Updated").length;
         const ongoing  = qDepts2.filter(([,d]) => d[q]==="Ongoing Update").length;
         const noUpdate = qDepts2.filter(([,d]) => d[q]==="No Update").length;
@@ -1738,34 +2000,58 @@ function App({ authUser, users, onUsersChange, onLogout }) {
       const qChiefSummary2 = qChiefGroups2.map(chief => {
         const cDepts = qDepts2.filter(([,d])=>d.chief===chief);
         const cTotal = cDepts.length;
-        return { chief, cTotal,
-          qData: quarters2.map((q,qi) => ({
-            q, isCurrent: qi===currentQIdx2,
-            updated:  cDepts.filter(([,d])=>d[q]==="Updated").length,
-            ongoing:  cDepts.filter(([,d])=>d[q]==="Ongoing Update").length,
-            noUpdate: cDepts.filter(([,d])=>d[q]==="No Update").length,
-            pending:  cDepts.filter(([,d])=>!d[q]).length,
-          }))
-        };
+        return { chief, cTotal, qData: QUARTERS.map((q,qi) => ({ q, isCurrent:qi===currentQIdx2, updated:cDepts.filter(([,d])=>d[q]==="Updated").length, ongoing:cDepts.filter(([,d])=>d[q]==="Ongoing Update").length, noUpdate:cDepts.filter(([,d])=>d[q]==="No Update").length })) };
       });
 
+      // Chief group horizontal bars (mirrors dashboard chart)
+      const chiefBarsHTML = chiefList2.map(c => {
+        const col = sc2(c.pct);
+        return `<div class="chief-bar-wrap">
+          <div class="chief-bar-label">
+            <span style="color:#0f172a">${esc(c.name)} <span style="color:#94a3b8;font-weight:400">${c.depts} depts · ${c.krs} KRs</span></span>
+            <span style="display:flex;gap:10px;align-items:center">
+              ${c.onTrack>0?`<span style="color:#16a34a;font-size:9px">✓${c.onTrack}</span>`:""}
+              ${c.atRisk>0?`<span style="color:#d97706;font-size:9px">⚠${c.atRisk}</span>`:""}
+              ${c.offTrack>0?`<span style="color:#dc2626;font-size:9px">✕${c.offTrack}</span>`:""}
+              <b style="color:${col}">${c.pct.toFixed(1)}%</b>
+              <span class="badge" style="background:${sbg(c.pct)};color:${col}">${slbl(c.pct)}</span>
+            </span>
+          </div>
+          <div class="chief-bar-track"><div class="chief-bar-fill" style="width:${Math.min(c.pct,100)}%;background:${col}"></div></div>
+        </div>`;
+      }).join("");
+
+      // Dept ranked table (mirrors dept performance bar chart)
+      const deptRankHTML = deptList2.map((d,i) => {
+        const rankColor = i===0?"#d97706":i===1?"#64748b":i===2?"#92400e":"#94a3b8";
+        return `<tr>
+          <td style="color:${rankColor};font-weight:800;text-align:center">#${i+1}</td>
+          <td><b>${esc(d.name)}</b></td>
+          <td><span style="font-size:9px;padding:1px 6px;border-radius:99px;background:#f1f5f9;color:#475569;font-weight:700">${esc(d.chief)}</span></td>
+          <td style="color:#64748b;text-align:center">${d.krs}</td>
+          <td style="color:#16a34a;font-weight:700;text-align:center">${d.onTrack}</td>
+          <td style="color:#d97706;font-weight:700;text-align:center">${d.atRisk}</td>
+          <td style="color:#dc2626;font-weight:700;text-align:center">${d.offTrack}</td>
+          <td>${bar(d.pct,80)}</td>
+          <td><span class="badge" style="background:${sbg(d.pct)};color:${sc2(d.pct)}">${slbl(d.pct)}</span></td>
+        </tr>`;
+      }).join("");
+
+      // Quarterly submission tiles
       const qTilesHTML = qTotal2 > 0 ? `
         <div style="margin-top:20px">
           <div style="font-size:12px;font-weight:800;margin-bottom:10px;color:#1e293b">📋 Quarterly Submission Status · ${qTotal2} Departments</div>
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">
             ${qStats2.map(({q,updated,ongoing,noUpdate,pending,pct,isCurrent})=>{
-              const col = pct>=80?"#16a34a":pct>=50?"#d97706":"#dc2626";
-              return `<div style="background:${isCurrent?"#eff6ff":"#f8fafc"};border:1.5px solid ${isCurrent?"#3b82f6":"#e2e8f0"};border-radius:10px;padding:12px 14px;position:relative">
-                ${isCurrent?`<div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:10px 10px 0 0"></div>`:""}
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-                  <span style="font-size:13px;font-weight:800;color:${isCurrent?"#3b82f6":"#1e293b"}">${q}</span>
-                  ${isCurrent?`<span style="font-size:9px;padding:1px 6px;border-radius:99px;background:#dbeafe;color:#3b82f6;font-weight:700">Now</span>`:""}
+              const col=pct>=80?"#16a34a":pct>=50?"#d97706":"#dc2626";
+              return `<div style="background:${isCurrent?"#eff6ff":"#f8fafc"};border:1.5px solid ${isCurrent?"#3b82f6":"#e2e8f0"};border-radius:10px;padding:12px 14px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                  <b style="color:${isCurrent?"#3b82f6":"#1e293b"}">${q}</b>
+                  ${isCurrent?`<span style="font-size:8px;padding:1px 5px;border-radius:99px;background:#dbeafe;color:#3b82f6;font-weight:700">Now</span>`:""}
                 </div>
-                <div style="font-size:28px;font-weight:900;color:${col};line-height:1;margin-bottom:6px">${pct}%</div>
-                <div style="height:5px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-bottom:8px">
-                  <div style="height:100%;width:${pct}%;background:${col};border-radius:99px"></div>
-                </div>
-                <div style="font-size:9.5px;display:flex;flex-direction:column;gap:2px">
+                <div style="font-size:24px;font-weight:900;color:${col};line-height:1;margin-bottom:6px">${pct}%</div>
+                <div style="height:4px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${pct}%;background:${col};border-radius:99px"></div></div>
+                <div style="font-size:9px;display:flex;flex-direction:column;gap:2px">
                   ${updated>0?`<div style="display:flex;justify-content:space-between"><span style="color:#16a34a">✓ Updated</span><b style="color:#16a34a">${updated}</b></div>`:""}
                   ${ongoing>0?`<div style="display:flex;justify-content:space-between"><span style="color:#d97706">⟳ Ongoing</span><b style="color:#d97706">${ongoing}</b></div>`:""}
                   ${noUpdate>0?`<div style="display:flex;justify-content:space-between"><span style="color:#dc2626">✕ No Update</span><b style="color:#dc2626">${noUpdate}</b></div>`:""}
@@ -1774,20 +2060,17 @@ function App({ authUser, users, onUsersChange, onLogout }) {
               </div>`;
             }).join("")}
           </div>
-          <table><thead><tr>
-            <th>Chief Group</th><th style="text-align:center">Depts</th>
-            ${quarters2.map((q,qi)=>`<th style="text-align:center;color:${qi===currentQIdx2?"#fff":"#fff"}">${q}${qi===currentQIdx2?" ★":""}</th>`).join("")}
-          </tr></thead><tbody>
-            ${qChiefSummary2.map(({chief,cTotal,qData},idx)=>`
-              <tr style="background:${idx%2===0?"#fff":"#f8fafc"}">
-                <td><b style="color:#1e293b">${esc(chief)}</b></td>
-                <td style="text-align:center;color:#64748b">${cTotal}</td>
-                ${qData.map(({updated,ongoing,noUpdate})=>{
-                  const dot = updated===cTotal?"#16a34a":ongoing>0?"#d97706":noUpdate>0?"#dc2626":"#94a3b8";
-                  const lbl = updated===cTotal?"All Updated":updated>0?updated+"/"+cTotal+" Updated":ongoing>0?"Ongoing":noUpdate>0?"No Update":"Pending";
-                  return `<td style="text-align:center"><span class="badge" style="background:${dot}18;color:${dot};border:1px solid ${dot}44">${lbl}</span></td>`;
-                }).join("")}
-              </tr>`).join("")}
+          <table><thead><tr><th>Chief Group</th><th style="text-align:center">Depts</th>${QUARTERS.map((q,qi)=>`<th style="text-align:center">${q}${qi===currentQIdx2?" ★":""}</th>`).join("")}</tr></thead>
+          <tbody>${qChiefSummary2.map(({chief,cTotal,qData},idx)=>`
+            <tr style="background:${idx%2===0?"#fff":"#f8fafc"}">
+              <td><b>${esc(chief)}</b></td>
+              <td style="text-align:center;color:#64748b">${cTotal}</td>
+              ${qData.map(({updated,ongoing,noUpdate})=>{
+                const dot=updated===cTotal?"#16a34a":ongoing>0?"#d97706":noUpdate>0?"#dc2626":"#94a3b8";
+                const lbl=updated===cTotal?"All Updated":updated>0?`${updated}/${cTotal} Updated`:ongoing>0?"Ongoing":noUpdate>0?"No Update":"Pending";
+                return `<td style="text-align:center"><span class="badge" style="background:${dot}18;color:${dot};border:1px solid ${dot}44">${lbl}</span></td>`;
+              }).join("")}
+            </tr>`).join("")}
           </tbody></table>
         </div>` : "";
 
@@ -1804,28 +2087,53 @@ function App({ authUser, users, onUsersChange, onLogout }) {
           <div class="kpi-card" style="color:#1e40af"><div class="kpi-label">Total KRs</div><div class="kpi-value" style="color:#1e40af">${rows.length}</div></div>
           <div class="kpi-card" style="color:#7c3aed"><div class="kpi-label">Departments</div><div class="kpi-value" style="color:#7c3aed">${deptList2.length}</div></div>
         </div>
-        <table><thead><tr><th>#</th><th>Chief Group</th><th>Depts</th><th>Total KRs</th><th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th></tr></thead>
-        <tbody>${chiefList2.map((c,i)=>`<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><b>${esc(c.name)}</b></td><td style="color:#64748b">${c.depts}</td><td style="color:#64748b">${c.krs}</td><td style="color:#16a34a;font-weight:700">${c.onTrack}</td><td style="color:#d97706;font-weight:700">${c.atRisk}</td><td style="color:#dc2626;font-weight:700">${c.offTrack}</td><td>${bar(c.pct,90)}</td><td><span class="badge" style="background:${sbg(c.pct)};color:${sc2(c.pct)}">${slbl(c.pct)}</span></td></tr>`).join("")}</tbody></table>
-        <div style="margin-top:14px"><div style="font-size:12px;font-weight:800;margin-bottom:10px">Department Rankings</div>
-        <table><thead><tr><th>Rank</th><th>Department</th><th>Chief Group</th><th>KRs</th><th>On Track</th><th>At Risk</th><th>Off Track</th><th>Score</th><th>Status</th></tr></thead>
-        <tbody>${deptList2.map((d,i)=>`<tr><td style="color:#94a3b8;font-weight:700">#${i+1}</td><td><b>${esc(d.name)}</b></td><td style="color:#64748b">${esc(d.chief)}</td><td style="color:#64748b">${d.krs}</td><td style="color:#16a34a;font-weight:700">${d.onTrack}</td><td style="color:#d97706;font-weight:700">${d.atRisk}</td><td style="color:#dc2626;font-weight:700">${d.offTrack}</td><td>${bar(d.pct,80)}</td><td><span class="badge" style="background:${sbg(d.pct)};color:${sc2(d.pct)}">${slbl(d.pct)}</span></td></tr>`).join("")}</tbody></table></div>
+
+        <div style="font-size:12px;font-weight:800;margin-bottom:10px;color:#1e293b">⭐ Chief Group Performance</div>
+        <div style="margin-bottom:18px">${chiefBarsHTML}</div>
+
+        <div style="font-size:12px;font-weight:800;margin:0 0 10px;color:#1e293b">🏢 Department Performance (Ranked)</div>
+        <div style="margin-bottom:18px;overflow-x:auto">
+          <div style="min-width:${Math.max(400, deptList2.length*52)}px;height:200px;position:relative;padding-bottom:64px;padding-left:36px">
+            ${[0,25,50,75,100].map(y=>`<div style="position:absolute;left:36px;right:0;top:${(1-y/100)*150}px;border-top:1px solid #e2e8f0;display:flex;align-items:center"><span style="position:absolute;left:-34px;width:32px;text-align:right;font-size:9px;color:#94a3b8">${y}%</span></div>`).join("")}
+            <div style="position:absolute;left:36px;right:0;top:0;bottom:64px;display:flex;align-items:flex-end;gap:3px">
+              ${deptList2.map((d,rank)=>{
+                const CCOLORS={"President":"#f5a623","CFO":"#7ed321","CSO":"#4a90e2","COO":"#9b59b6","CITO":"#1abc9c","EMSI":"#e74c3c","Other":"#95a5a6"};
+                const col=CCOLORS[d.chief]||"#64748b";
+                const h=Math.max(2,d.pct);
+                const rankCol=rank===0?"#d97706":rank===1?"#64748b":rank===2?"#92400e":"#94a3b8";
+                return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;height:100%;justify-content:flex-end;position:relative;min-width:36px">
+                  <div style="font-size:8px;color:${sc2(d.pct)};font-weight:700;margin-bottom:2px">${d.pct.toFixed(0)}%</div>
+                  <div style="width:75%;height:${h}%;background:linear-gradient(180deg,${col},${col}88);border-radius:3px 3px 1px 1px;min-height:2px"></div>
+                  <div style="position:absolute;bottom:-16px;left:50%;transform:translateX(-50%);font-size:8px;font-weight:800;color:${rankCol}">#${rank+1}</div>
+                  <div style="position:absolute;bottom:-50px;left:50%;transform:translateX(-50%) rotate(-40deg);font-size:7.5px;color:#64748b;white-space:nowrap;transform-origin:top left;width:60px;overflow:hidden;text-overflow:ellipsis">${d.name}</div>
+                </div>`;
+              }).join("")}
+            </div>
+          </div>
+        </div>
+
         ${qTilesHTML}
       </div>`;
     })();
 
-    // ── Section: KR Tracker ──
+    // ── Section: KR Tracker — now includes Q1–Q4 actuals ──
     const trackerSection = !selections.includes("tracker") ? "" : `
     <div class="divider"></div>
     <div class="section">
       <div class="section-title">⊞ KR Tracker List</div>
-      <div class="section-sub">All ${rows.length} Key Results for FY ${activeYear} · sorted by Chief Group → Department → Score</div>
-      <table><thead><tr><th>#</th><th>Chief</th><th>Department</th><th>Key Result</th><th>Target Date</th><th>Target</th><th>Actual</th><th>Formula</th><th>% Done</th><th>Status</th></tr></thead>
-      <tbody>${sortedRows.map((r,i)=>`<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:220px">${esc(r.keyResult)}</td><td style="white-space:nowrap;color:#64748b">${esc(r.targetDate||"—")}</td><td style="color:#64748b">${Number(r.target).toLocaleString()}</td><td style="font-weight:700">${r.actual===""||r.actual===null||r.actual===undefined?"":Number(r.actual).toLocaleString()}</td><td style="color:#64748b;font-size:9.5px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.pct)};font-weight:800">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`).join("")}</tbody></table>
+      <div class="section-sub">All ${rows.length} Key Results for FY ${activeYear} · sorted by Chief Group → Department · % Done based on latest quarter recorded</div>
+      <table><thead><tr><th>#</th><th>Chief</th><th>Department</th><th>Key Result</th><th>Target</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Actual</th><th>Formula</th><th>% Done</th><th>Status</th></tr></thead>
+      <tbody>${sortedRows.map((r,i)=>{
+        const qa=r.qActuals||{};
+        const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+        const qCells=QUARTERS.map(q=>{const v=qa[q];const hasV=v!==""&&v!==null&&v!==undefined;const isLatest=q===latestQ;const latestStyle=isLatest?"font-weight:800;color:"+sc2(r.pct)+";background:#eff6ff":"";return "<td style='text-align:center;"+latestStyle+"'>"+(hasV?Number(v).toLocaleString():"—")+"</td>";}).join("");
+        const actualDisplay=r.actual!==""&&r.actual!==null&&r.actual!==undefined?Number(r.actual).toLocaleString():"—";
+        return `<tr><td style="color:#94a3b8;font-size:10px">${i+1}</td><td><span class="badge" style="background:#eff6ff;color:#1e40af">${esc(r.chiefGroup||getChief(r.department))}</span></td><td><b>${esc(r.department)}</b></td><td style="max-width:180px">${esc(r.keyResult)}</td><td style="color:#64748b;text-align:center">${Number(r.target).toLocaleString()}</td>${qCells}<td style="font-weight:700;text-align:center">${actualDisplay}${latestQ?`<span style="font-size:8px;color:#94a3b8;display:block">${latestQ}</span>`:""}</td><td style="color:#64748b;font-size:9px">${esc(r.formulaType||"higher")}</td><td style="color:${sc2(r.pct)};font-weight:800;text-align:center">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`;
+      }).join("")}</tbody></table>
     </div>`;
 
-    // ── Section: Quarterly ──
+    // ── Section: Quarterly — submission status + KR quarterly actuals ──
     const quarterlySection = !selections.includes("quarterly") ? "" : (()=>{
-      const quarters = ["Q1","Q2","Q3","Q4"];
       const ssColor = v => v==="Updated"?"#16a34a":v==="Ongoing Update"?"#d97706":v==="No Update"?"#dc2626":"#94a3b8";
       const ssLabel = v => v||"— Pending";
       const deptsByChief = {};
@@ -1835,17 +2143,33 @@ function App({ authUser, users, onUsersChange, onLogout }) {
         if(!deptsByChief[c]) deptsByChief[c]=[];
         deptsByChief[c].push({dept:dept.trim(),...data});
       });
-      const rows2 = Object.entries(deptsByChief).sort().flatMap(([chief,depts])=>
+      const submissionRows = Object.entries(deptsByChief).sort().flatMap(([chief,depts])=>
         depts.map((d,di)=>`<tr><td>${di===0?`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:99px;background:#f1f5f9;color:#64748b">${esc(chief)}</span><br>`:""}
           <span style="font-weight:600">${esc(d.dept)}</span></td>
-          ${quarters.map(q=>{const v=d[q]||"";const col=ssColor(v);return `<td style="text-align:center"><span class="badge" style="background:${col}18;color:${col};border:1px solid ${col}44">${ssLabel(v)}</span></td>`;}).join("")}</tr>`)
+          ${QUARTERS.map(q=>{const v=d[q]||"";const col=ssColor(v);return `<td style="text-align:center"><span class="badge" style="background:${col}18;color:${col};border:1px solid ${col}44">${ssLabel(v)}</span></td>`;}).join("")}</tr>`)
       ).join("");
+
+      // KR quarterly actuals table
+      const krQRows = sortedRows.map((r,i)=>{
+        const qa=r.qActuals||{};
+        const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
+        const qCells=QUARTERS.map(q=>{
+          const v=qa[q]; const hasV=v!==""&&v!==null&&v!==undefined;
+          const pct2=hasV?computePct(r,v):null;
+          const isLatest=q===latestQ;
+          const bgStyle=isLatest?"background:#eff6ff;":"";
+          const inner=hasV?"<div style='font-weight:700;color:"+sc2(pct2)+"'>"+pct2+"%</div><div style='font-size:9px;color:#64748b'>"+Number(v).toLocaleString()+"</div>":"<span style='color:#e2e8f0'>—</span>";
+          return "<td style='text-align:center;"+bgStyle+"'>"+inner+"</td>";
+        }).join("");
+        return `<tr><td style="color:#94a3b8;font-size:9px">${i+1}</td><td style="max-width:180px;font-size:10px;font-weight:600">${esc(r.keyResult)}</td><td style="font-size:9px;color:#64748b">${esc(r.department)}</td><td style="text-align:center;color:#64748b">${Number(r.target).toLocaleString()}</td>${qCells}<td style="text-align:center;font-weight:800;color:${sc2(r.pct)}">${r.pct}%</td><td><span class="badge" style="background:${sbg(r.pct)};color:${sc2(r.pct)}">${slbl(r.pct)}</span></td></tr>`;
+      }).join("");
+
       return `<div class="divider"></div>
       <div class="section">
         <div class="section-title">📋 Quarterly Submission Status</div>
         <div class="section-sub">Department submission & review status per quarter · FY ${activeYear}</div>
-        <table><thead><tr><th>Chief / Department</th><th style="text-align:center">Q1</th><th style="text-align:center">Q2</th><th style="text-align:center">Q3</th><th style="text-align:center">Q4</th></tr></thead>
-        <tbody>${rows2}</tbody></table>
+        <table><thead><tr><th>Chief / Department</th>${QUARTERS.map(q=>`<th style="text-align:center">${q}</th>`).join("")}</tr></thead>
+        <tbody>${submissionRows}</tbody></table>
       </div>`;
     })();
 
@@ -2092,60 +2416,123 @@ function App({ authUser, users, onUsersChange, onLogout }) {
 
               {rows.length > 0 && (
                 <>
-                  {/* Department Rankings */}
-                  {(()=>{
-                    const RANK_PAGE_SIZE = 10;
-                    const totalRankPages = Math.ceil(deptStats.length / RANK_PAGE_SIZE);
-                    const safeRankPage = Math.min(rankPage, Math.max(1, totalRankPages));
-                    const pageStart = (safeRankPage-1)*RANK_PAGE_SIZE;
-                    const pageDepts = deptStats.slice(pageStart, pageStart+RANK_PAGE_SIZE);
+                  {/* ── Performance Charts ── */}
+                  {rows.length > 0 && (()=>{
+                    const QUARTERS = ["Q1","Q2","Q3","Q4"];
+
+                    // Chief performance — pct per chief using latest quarterly or annual actual
+                    const chiefPerf = chiefStats.map(cs => ({
+                      name: cs.name,
+                      pct: cs.pct,
+                      col: CHIEF_COLORS[cs.name]||C.muted,
+                      onTrack: cs.onTrack,
+                      atRisk: cs.atRisk,
+                      offTrack: cs.offTrack,
+                      krs: cs.krs.length,
+                    })).sort((a,b)=>b.pct-a.pct);
+
+                    // Dept quarterly trend — for each dept, compute pct per quarter from qActuals
+                    const deptTrend = deptStats.map(ds => {
+                      const deptRows = ds.krs;
+                      const qPcts = QUARTERS.map(q => {
+                        const scored = deptRows.filter(r => {
+                          const v = (r.qActuals||{})[q];
+                          return v!==""&&v!==null&&v!==undefined;
+                        });
+                        if (scored.length === 0) return null;
+                        const w = scored.reduce((s,r)=>s+r.weight,0);
+                        const se = scored.reduce((s,r)=>s+(computePct(r,(r.qActuals||{})[q])/100*r.weight),0);
+                        return w>0 ? +(se/w*100).toFixed(1) : null;
+                      });
+                      return { name: ds.name, chief: ds.chief, pct: ds.pct, qPcts, krs: deptRows };
+                    });
+                    const deptsWithQData = deptTrend.filter(d=>d.qPcts.some(p=>p!==null));
+                    const allDeptsForBar = deptTrend.sort((a,b)=>b.pct-a.pct);
+
                     return (
-                      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:16,overflow:"hidden"}}>
-                        <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-                          <div>
-                            <h2 style={{fontSize:14,fontWeight:800,margin:0}}>Department Rankings</h2>
-                            <p style={{fontSize:12,color:C.muted,margin:"2px 0 0"}}>Click a department to view its KRs</p>
+                      <>
+                        {/* ── Chief Performance ── */}
+                        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:18,overflow:"hidden"}}>
+                          <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                            <div>
+                              <div style={{fontSize:14,fontWeight:800}}>⭐ Chief Group Performance</div>
+                              <div style={{fontSize:11,color:C.muted,marginTop:2}}>Overall % done per chief group · FY {activeYear}</div>
+                            </div>
                           </div>
-                          <div style={{fontSize:12,color:C.muted}}>{deptStats.length} departments</div>
+                          <div style={{padding:"20px"}}>
+                            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                              {chiefPerf.map(({name,pct,col,onTrack,atRisk,offTrack,krs})=>(
+                                <div key={name}>
+                                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+                                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                                      <div style={{width:10,height:10,borderRadius:99,background:col,flexShrink:0}}/>
+                                      <span style={{fontSize:12,fontWeight:700,color:C.text}}>{name}</span>
+                                      <span style={{fontSize:10,color:C.muted}}>{krs} KRs</span>
+                                    </div>
+                                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                      <div style={{display:"flex",gap:6}}>
+                                        {onTrack>0&&<span style={{fontSize:10,color:C.green,fontWeight:700}}>✓{onTrack}</span>}
+                                        {atRisk>0&&<span style={{fontSize:10,color:C.amber,fontWeight:700}}>⚠{atRisk}</span>}
+                                        {offTrack>0&&<span style={{fontSize:10,color:C.red,fontWeight:700}}>✕{offTrack}</span>}
+                                      </div>
+                                      <span style={{fontSize:13,fontWeight:800,color:sc(pct),minWidth:44,textAlign:"right"}}>{pct.toFixed(1)}%</span>
+                                    </div>
+                                  </div>
+                                  <div style={{height:10,background:C.surface,borderRadius:99,overflow:"hidden",position:"relative"}}>
+                                    <div style={{position:"absolute",inset:0,display:"flex"}}>
+                                      {onTrack>0&&<div style={{width:`${(onTrack/krs)*pct}%`,background:C.green,transition:"width .6s ease"}}/>}
+                                      {atRisk>0&&<div style={{width:`${(atRisk/krs)*pct}%`,background:C.amber,transition:"width .6s ease"}}/>}
+                                      {offTrack>0&&<div style={{width:`${(offTrack/krs)*pct}%`,background:C.red,transition:"width .6s ease"}}/>}
+                                    </div>
+                                    <div style={{position:"absolute",left:0,top:0,height:"100%",width:`${Math.min(pct,100)}%`,background:`linear-gradient(90deg,${col}cc,${col})`,borderRadius:99,transition:"width .6s ease",opacity:0.85}}/>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
                         </div>
-                        {pageDepts.map((dept,i)=>{
-                          const globalIdx = pageStart + i;
-                          const dc=colorMap[dept.name]||C.accent, cc=CHIEF_COLORS[dept.chief]||C.muted;
-                          return (
-                            <div key={dept.name} onClick={()=>{ setFilterType(dept.chief||"ALL"); setSelDept(dept.name); setStatusFilter(null); setView("tracker"); }}
-                              style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px",borderBottom:i<pageDepts.length-1?`1px solid ${C.border}`:"none",cursor:"pointer",transition:"background .15s"}}
-                              onMouseEnter={e=>e.currentTarget.style.background=`${dc}0d`}
-                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                              <div style={{fontSize:18,fontWeight:800,fontFamily:"'Bebas Neue'",color:globalIdx===0?C.gold:globalIdx===1?"#c0c0c0":globalIdx===2?"#cd7f32":C.muted,width:28,flexShrink:0,textAlign:"center"}}>{globalIdx+1}</div>
-                              <div style={{flex:1,minWidth:0}}>
-                                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                                  <div style={{width:7,height:7,borderRadius:99,background:dc,flexShrink:0}}/>
-                                  <span style={{fontSize:13,fontWeight:700,color:dc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{dept.name}</span>
+
+                        {/* ── Department Performance Bar ── */}
+                        <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:18,overflow:"hidden"}}>
+                          <div style={{padding:"16px 20px",borderBottom:`1px solid ${C.border}`}}>
+                            <div style={{fontSize:14,fontWeight:800}}>🏢 Department Performance</div>
+                            <div style={{fontSize:11,color:C.muted,marginTop:2}}>Ranked by overall % done · click a bar to see quarterly trend · {allDeptsForBar.length} departments</div>
+                          </div>
+                          <div style={{padding:"16px 20px",overflowX:"auto"}}>
+                            <div style={{minWidth:Math.max(400,allDeptsForBar.length*56),height:220,position:"relative",paddingBottom:70}}>
+                              {/* Y-axis grid */}
+                              {[0,25,50,75,100].map(y=>(
+                                <div key={y} style={{position:"absolute",left:28,right:0,top:`${(1-y/100)*(220-70)}px`,borderTop:`1px solid ${C.border}33`,display:"flex",alignItems:"center"}}>
+                                  <span style={{fontSize:9,color:C.muted,position:"absolute",left:-30,width:28,textAlign:"right"}}>{y}%</span>
                                 </div>
-                                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                                  <span style={{fontSize:10,padding:"1px 6px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700}}>{dept.chief}</span>
-                                  <span className="dsk" style={{fontSize:11,color:C.muted}}>{dept.krs.length} KRs</span>
-                                </div>
+                              ))}
+                              {/* Bars */}
+                              <div style={{position:"absolute",left:28,right:0,top:0,bottom:70,display:"flex",alignItems:"flex-end",gap:4}}>
+                                {allDeptsForBar.map(({name,pct,chief,qPcts,krs},rank)=>{
+                                  const col=CHIEF_COLORS[chief]||C.accent;
+                                  const h=Math.max(2,pct);
+                                  const rankColor=rank===0?C.gold:rank===1?"#c0c0c0":rank===2?"#cd7f32":C.muted;
+                                  return (
+                                    <div key={name} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",height:"100%",justifyContent:"flex-end",position:"relative",minWidth:44,cursor:"pointer"}}
+                                      title={`#${rank+1} ${name}: ${pct.toFixed(1)}% — click for quarterly trend`}
+                                      onClick={()=>setDeptTrendModal({name,chief,pct,qPcts,krs})}>
+                                      <div style={{fontSize:9,color:sc(pct),fontWeight:700,marginBottom:2}}>{pct.toFixed(0)}%</div>
+                                      <div style={{width:"78%",height:`${h}%`,background:`linear-gradient(180deg,${col},${col}88)`,borderRadius:"4px 4px 2px 2px",transition:"height .5s ease",boxShadow:`0 2px 8px ${col}44`,minHeight:2,border:`1px solid ${col}55`}}/>
+                                      {/* Rank label */}
+                                      <div style={{position:"absolute",bottom:-18,left:"50%",transform:"translateX(-50%)",fontSize:9,fontWeight:800,color:rankColor,whiteSpace:"nowrap"}}>#{rank+1}</div>
+                                      {/* Dept name */}
+                                      <div style={{position:"absolute",bottom:-52,left:"50%",transform:"translateX(-50%) rotate(-40deg)",fontSize:8.5,color:C.muted,whiteSpace:"nowrap",transformOrigin:"top left",width:68,overflow:"hidden",textOverflow:"ellipsis"}}>{name}</div>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                              <div className="dsk" style={{width:100,paddingRight:8}}><Bar pct={dept.pct} color={sc(dept.pct)} h={5}/></div>
-                              <div style={{fontSize:20,fontWeight:800,fontFamily:"'Bebas Neue'",color:sc(dept.pct),flexShrink:0,minWidth:64,textAlign:"right"}}>{dept.pct.toFixed(1)}%</div>
-                              <div style={{flexShrink:0}}><Badge score={dept.pct}/></div>
-                            </div>
-                          );
-                        })}
-                        {totalRankPages > 1 && (
-                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px",borderTop:`1px solid ${C.border}`,background:`${C.surface}88`,flexWrap:"wrap",gap:8}}>
-                            <div style={{fontSize:12,color:C.muted}}><b style={{color:C.text}}>{pageStart+1}–{Math.min(pageStart+RANK_PAGE_SIZE,deptStats.length)}</b> of <b style={{color:C.text}}>{deptStats.length}</b> departments</div>
-                            <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                              <button onClick={()=>setRankPage(p=>Math.max(1,p-1))} disabled={safeRankPage===1} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safeRankPage===1?C.border:C.muted,cursor:safeRankPage===1?"default":"pointer",fontSize:12,fontWeight:600}}>‹ Prev</button>
-                              {Array.from({length:totalRankPages},(_,i)=>i+1).map(n=>(<button key={n} onClick={()=>setRankPage(n)} style={{padding:"5px 9px",borderRadius:7,border:`1px solid ${n===safeRankPage?C.accent:C.border}`,background:n===safeRankPage?`${C.accent}22`:"transparent",color:n===safeRankPage?C.accent:C.muted,cursor:"pointer",fontWeight:n===safeRankPage?700:400,fontSize:12}}>{n}</button>))}
-                              <button onClick={()=>setRankPage(p=>Math.min(totalRankPages,p+1))} disabled={safeRankPage===totalRankPages} style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:safeRankPage===totalRankPages?C.border:C.muted,cursor:safeRankPage===totalRankPages?"default":"pointer",fontSize:12,fontWeight:600}}>Next ›</button>
                             </div>
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      </>
                     );
                   })()}
+
 
                   {/* Quarterly Submission Summary */}
                   {(()=>{
@@ -2255,7 +2642,6 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                       </div>
                     );
                   })()}
-
                   {/* AI Insights */}
                   <AIInsightsCard rows={rows} allDepts={allDepts} insights={insights} setInsights={setInsights} loadingAI={loadingAI} loadAI={loadAI}/>
                 </>
@@ -2371,10 +2757,10 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                   <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",width:"100%"}}>
                     <div style={{overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
                       <table style={{width:"100%",borderCollapse:"collapse",minWidth:780,tableLayout:"fixed"}}>
-                        <colgroup><col style={{width:36}}/><col style={{width:80}}/><col style={{width:130}}/><col/><col style={{width:90}}/><col style={{width:70}}/><col style={{width:65}}/><col style={{width:130}}/><col style={{width:68}}/><col style={{width:96}}/></colgroup>
+                        <colgroup><col style={{width:36}}/><col style={{width:80}}/><col style={{width:120}}/><col/><col style={{width:88}}/><col style={{width:66}}/><col style={{width:62}}/><col style={{width:126}}/><col style={{width:66}}/><col style={{width:94}}/></colgroup>
                         <thead>
                           <tr style={{background:C.surface}}>
-                            <th style={{padding:"9px 10px",textAlign:"left",fontSize:10,color:C.muted,borderBottom:`1px solid ${C.border}`,width:40}}>
+                            <th style={{padding:"9px 10px",textAlign:"left",fontSize:10,color:C.muted,borderBottom:`1px solid ${C.border}`}}>
                               <input type="checkbox" checked={selectedIds.size===visibleRows.length&&visibleRows.length>0} onChange={e=>{ if(e.target.checked) setSelectedIds(new Set(visibleRows.map(r=>r.id))); else setSelectedIds(new Set()); }} style={{cursor:"pointer",accentColor:C.accent}}/>
                             </th>
                             {["Chief","Department","Key Result","Target Date","Target","Actual","Formula","% Done","Status"].map(h=>(
@@ -2386,19 +2772,27 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                           {pageRows.map((row,idx)=>{
                             const dc=colorMap[row.department]||C.accent, chief=row.chiefGroup||getChief(row.department), cc=CHIEF_COLORS[chief]||C.muted;
                             const isSel=selectedIds.has(row.id);
+                            const qa=row.qActuals||{};
+                            const latestQ=["Q4","Q3","Q2","Q1"].find(q=>qa[q]!==""&&qa[q]!==null&&qa[q]!==undefined);
                             return (
-                              <tr key={row.id} className="kr-row" style={{background:isSel?`${C.accent}12`:idx%2===0?"transparent":`${C.surface}44`,borderBottom:idx<pageRows.length-1?`1px solid ${C.border}`:"none",height:44}}>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={isSel} onChange={e=>{const s=new Set(selectedIds); if(e.target.checked) s.add(row.id); else s.delete(row.id); setSelectedIds(s);}} style={{cursor:"pointer",accentColor:C.accent}}/></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,padding:"2px 6px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700,whiteSpace:"nowrap"}}>{chief||"—"}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:99,background:dc,flexShrink:0}}/><span style={{fontSize:11,fontWeight:700,color:dc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.department}</span></div></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.keyResult}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{row.targetDate||"—"}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"":Number(row.actual).toLocaleString()}</span></td>
-                                <td style={{padding:"0 6px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
-                                <td style={{padding:"0 8px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span></td>
-                                <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={()=>setDetailRow(row)}><Badge score={row.pct} small/></td>
-                              </tr>
+                              <React.Fragment key={row.id}>
+                                <tr className="kr-row" style={{background:isSel?`${C.accent}12`:idx%2===0?"transparent":`${C.surface}44`,borderBottom:`1px solid ${C.border}22`,height:44,cursor:"pointer"}}
+                                  onClick={()=>setDetailRow(row)}>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={isSel} onChange={e=>{const s=new Set(selectedIds); if(e.target.checked) s.add(row.id); else s.delete(row.id); setSelectedIds(s);}} style={{cursor:"pointer",accentColor:C.accent}}/></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><span style={{fontSize:10,padding:"2px 6px",borderRadius:99,background:`${cc}18`,color:cc,border:`1px solid ${cc}33`,fontWeight:700,whiteSpace:"nowrap"}}>{chief||"—"}</span></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:6,height:6,borderRadius:99,background:dc,flexShrink:0}}/><span style={{fontSize:11,fontWeight:700,color:dc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.department}</span></div></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}}><span style={{fontSize:11,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block"}}>{row.keyResult}</span></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle",overflow:"hidden"}}><span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{row.targetDate||"—"}</span></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><span style={{fontSize:11,color:C.muted}}>{Number(row.target).toLocaleString()}</span></td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><span style={{fontSize:11,fontWeight:600,color:row.actual===""||row.actual===null||row.actual===undefined?C.muted:C.text}}>{row.actual===""||row.actual===null||row.actual===undefined?"":Number(row.actual).toLocaleString()}</span></td>
+                                  <td style={{padding:"0 6px",verticalAlign:"middle"}}>{(()=>{const ft=row.formulaType||"higher";const FTC={higher:C.green,lower:C.amber,exact:C.accent,"exact+higher":C.green,"exact+lower":C.amber};const fc=FTC[ft]||C.accent;return <span className="formula-badge" style={{fontSize:9,padding:"2px 6px",borderRadius:99,background:`${fc}18`,color:fc,border:`1px solid ${fc}33`,fontWeight:700}}>{FORMULA_ICONS[ft]||"↑"} {ft}</span>;})()}</td>
+                                  <td style={{padding:"0 8px",verticalAlign:"middle"}}>
+                                    <span style={{fontSize:13,fontWeight:800,color:sc(row.pct),whiteSpace:"nowrap"}}>{row.pct}%</span>
+                                    {latestQ&&<div style={{fontSize:9,color:C.muted,marginTop:1}}>{latestQ}</div>}
+                                  </td>
+                                  <td style={{padding:"0 10px",verticalAlign:"middle"}}><Badge score={row.pct} small/></td>
+                                </tr>
+                              </React.Fragment>
                             );
                           })}
                         </tbody>
@@ -2426,6 +2820,8 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                 <h1 style={{fontSize:"clamp(18px,5vw,22px)",fontWeight:800}}>Quarterly Status Submission</h1>
                 <p style={{fontSize:12,color:C.muted,marginTop:3}}>Track submission & review per department · click any cell to update · FY {activeYear}</p>
               </div>
+
+              {/* ── Submission deadlines ── */}
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:14}}>
                 <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.border}`}}>
                   <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:8}}>📅 Submission Deadlines</div>
@@ -2444,7 +2840,9 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                   </div>
                 </div>
               </div>
-              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflowX:"auto"}}>
+
+              {/* ── Department submission status ── */}
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,overflowX:"auto",marginBottom:20}}>
                 <table style={{width:"100%",borderCollapse:"collapse",minWidth:600}}>
                   <thead>
                     <tr style={{background:C.surface}}>
@@ -2483,6 +2881,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
                   </tbody>
                 </table>
               </div>
+
             </div>
           )}
 
@@ -2611,6 +3010,7 @@ function App({ authUser, users, onUsersChange, onLogout }) {
       {showTemplate&&<TemplateModal onClose={()=>setShowTemplate(false)}/>}
       {showUserMgmt&&<UserMgmtModal users={users} onClose={()=>setShowUserMgmt(false)} onSave={list=>{onUsersChange(list);setShowUserMgmt(false);toast$("Users saved.");}}/>}
       {showPDFModal&&<PDFExportModal onClose={()=>setShowPDFModal(false)} onExport={(sel)=>{setShowPDFModal(false);buildAndDownloadPDF(sel);}} activeYear={activeYear} rows={rows} issues={issues}/>}
+      {deptTrendModal&&<DeptTrendModal dept={deptTrendModal} onClose={()=>setDeptTrendModal(null)}/>}
     </>
   );
 }
